@@ -2,7 +2,8 @@
 #  main.py — SEMY EDITION (AUTO: IND + match start, no prompt)
 #  Owner: SEMY | Telegram: @SEMY
 # ═══════════════════════════════════════════════════════════════════════════
-
+import os
+os.environ['PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION'] = 'python'
 import sys
 import asyncio
 import time
