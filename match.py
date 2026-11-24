@@ -1534,20 +1534,14 @@ async def slave_loop(acct, holder, match_infos, stop_evt):
     ka_bytes = await send_keep_alive(region)
     remote_version = acct["cfg"].get("remote_version", _PLAY_VERSION)
 
-    # 🔁 Max 5 reconnect attempts (join fail hone par wapas connect)
-    for cycle in range(3):
-        if stop_evt.is_set():
-            return
-        if ingame_id in holder["slave_joined"]:
-            # already joined, sirf keepalive karte raho
-            break
+    while not stop_evt.is_set():
         try:
             reader, writer = await asyncio.open_connection(ip, int(port))
             writer.write(auth_online)
             await writer.drain()
             writer.write(ka_bytes)
             await writer.drain()
-            _log(f"Tcp Connected => {acct.get('name', tag)} (try {cycle+1})")
+            _log(f"Tcp Connected => {acct.get('name', tag)}")
 
             ka_stop = asyncio.Event()
 
@@ -1568,14 +1562,12 @@ async def slave_loop(acct, holder, match_infos, stop_evt):
                 ka_stop.set()
                 ka_task.cancel()
                 writer.close()
-                await asyncio.sleep(1.0)
                 continue
 
             team_code = holder["team_code"]
             j = br_join_team_pkt(team_code, region, remote_version, key, iv)
-
-            # ✅ JOIN packet 5 baar repeat (2s gap) — drop ho toh bhi pahunche
-            join_task = asyncio.create_task(_slave_join_burst(writer, j, repeats=3, gap=2.0))
+            writer.write(j)
+            await writer.drain()
 
             joined = False
             join_sent_at = time.time()
@@ -1585,9 +1577,10 @@ async def slave_loop(acct, holder, match_infos, stop_evt):
                 try:
                     chunk = await asyncio.wait_for(reader.read(65536), timeout=1.0)
                 except asyncio.TimeoutError:
-                    # 4 sec tak koi server frame nahi aaya join ke baad → retry cycle
-                    if not joined and time.time() - join_sent_at > 4:
-                        break
+                    if not joined and time.time() - join_sent_at > 3:
+                        joined = True
+                        holder["slave_joined"].add(ingame_id)
+                        print(f"  Bot Joined The Team => {acct.get('name', tag)}")
                     continue
                 except Exception:
                     break
@@ -1617,7 +1610,6 @@ async def slave_loop(acct, holder, match_infos, stop_evt):
                     if minfo is not None and tag not in match_infos:
                         match_infos[tag] = minfo
 
-            join_task.cancel()
             ka_stop.set()
             ka_task.cancel()
             writer.close()
@@ -1625,41 +1617,10 @@ async def slave_loop(acct, holder, match_infos, stop_evt):
                 await writer.wait_closed()
             except Exception:
                 pass
-
-            if joined or ingame_id in holder["slave_joined"]:
-                # joined — ab sirf wait karo jab tak match_infos na mile
-                if tag in match_infos:
-                    break
-                # match info milne ka wait (max 60s)
-                t0 = time.time()
-                while time.time() - t0 < 60 and not stop_evt.is_set():
-                    if tag in match_infos:
-                        break
-                    await asyncio.sleep(0.5)
+            if stop_evt.is_set():
                 break
-            else:
-                print(f"  🔁 {tag} join fail, reconnecting ({cycle+1}/5)...")
-                await asyncio.sleep(2.0)
-        except Exception as e:
-            _log(f"{tag} slave err: {e}")
+        except Exception:
             await asyncio.sleep(2.0)
-
-        if stop_evt.is_set():
-            break
-
-
-async def _slave_join_burst(writer, join_pkt, repeats=5, gap=2.0):
-    """Join packet ko multiple baar bhejo jab tak cancel na ho."""
-    try:
-        for _ in range(repeats):
-            try:
-                writer.write(join_pkt)
-                await writer.drain()
-            except Exception:
-                return
-            await asyncio.sleep(gap)
-    except asyncio.CancelledError:
-        pass
 
 
 # ═══════════════ MASTER LOOP ═══════════════
@@ -2005,26 +1966,67 @@ async def run_one_squad(batch, region_hint=None):
     }
     match_infos = {}
     slave_stop = asyncio.Event()
-    slave_tasks = [asyncio.create_task(
-        slave_loop(s, holder, match_infos, slave_stop)) for s in slaves]
-    await asyncio.sleep(2.0)
+
+    # ══════════════════════════════════════════════════════════════
+    # STEP 1: MASTER PEHLE START — team create kare
+    # ══════════════════════════════════════════════════════════════
+    print(f"  [1/3] Creating team with master {master.get('name', '?')}...")
     master_task = asyncio.create_task(
         master_loop(master, slave_ids, holder, match_infos))
-        
+
+    # ══════════════════════════════════════════════════════════════
+    # STEP 2: TEAM_CODE READY HONE TAK WAIT
+    #   Hosting pe network slow ho sakta hai, isliye 45s timeout
+    # ══════════════════════════════════════════════════════════════
+    try:
+        await asyncio.wait_for(holder["team_code_ready"].wait(), 45)
+        print(f"  [2/3] ✅ Team created (code: {holder['team_code']})")
+    except asyncio.TimeoutError:
+        print(f"  [2/3] ❌ Master failed to create team in 45s — aborting")
+        master_task.cancel()
+        try:
+            await master_task
+        except asyncio.CancelledError:
+            pass
+        return False
+
+    # ══════════════════════════════════════════════════════════════
+    # STEP 3: AB SLAVES START — join karein
+    #   Team already created hai, isliye koi race nahi
+    # ══════════════════════════════════════════════════════════════
+    print(f"  [3/3] Starting {len(slaves)} slaves to join team...")
+    slave_tasks = [asyncio.create_task(
+        slave_loop(s, holder, match_infos, slave_stop)) for s in slaves]
+
+    # ── Match info ka wait (all accounts) ──
     expected_tags = [a["tag"] for a in logged_in]
-    deadline = time.time() + 180
+    deadline = time.time() + 240   # 180 → 240 (hosting safety)
     while time.time() < deadline:
         if all(t in match_infos for t in expected_tags):
             break
         await asyncio.sleep(0.5)
-        
+
     missing = [t for t in expected_tags if t not in match_infos]
     if missing:
+        print(f"  ⚠ Match info missing for: {missing} — aborting squad")
         slave_stop.set()
         for t in slave_tasks + [master_task]:
             t.cancel()
         await asyncio.gather(*(slave_tasks + [master_task]), return_exceptions=True)
         return False
+
+    # ── Extra check: saare slaves actually joined hain? ──
+    all_joined = holder["slave_joined"] >= {int(s["ingame_id"]) for s in slaves}
+    if not all_joined:
+        joined_count = len(holder["slave_joined"])
+        print(f"  ⚠ SQUAD INCOMPLETE — joined {joined_count}/{len(slaves)} slaves")
+        slave_stop.set()
+        for t in slave_tasks + [master_task]:
+            t.cancel()
+        await asyncio.gather(*(slave_tasks + [master_task]), return_exceptions=True)
+        return False
+
+    print(f"  ✅ All {len(logged_in)} players joined team — proceeding to match")
 
     squad_done = {
         "event": asyncio.Event(),
@@ -2082,7 +2084,7 @@ async def run_one_squad(batch, region_hint=None):
     try:
         wait_task = asyncio.create_task(squad_done["event"].wait())
         all_udp = asyncio.gather(*udp_tasks, return_exceptions=True)
-        
+
         done_set, pending = await asyncio.wait(
             [wait_task, all_udp],
             timeout=SQUAD_TIMEOUT,
@@ -2090,7 +2092,7 @@ async def run_one_squad(batch, region_hint=None):
         )
         if not wait_task.done():
             wait_task.cancel()
-            
+
         for task in udp_tasks:
             if not task.done():
                 task.cancel()
@@ -2102,7 +2104,7 @@ async def run_one_squad(batch, region_hint=None):
         for t in tcp_tasks:
             t.cancel()
         await asyncio.gather(*tcp_tasks, return_exceptions=True)
-    
+
     return True
 
 
