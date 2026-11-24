@@ -1534,14 +1534,20 @@ async def slave_loop(acct, holder, match_infos, stop_evt):
     ka_bytes = await send_keep_alive(region)
     remote_version = acct["cfg"].get("remote_version", _PLAY_VERSION)
 
-    while not stop_evt.is_set():
+    # 🔁 Max 5 reconnect attempts (join fail hone par wapas connect)
+    for cycle in range(3):
+        if stop_evt.is_set():
+            return
+        if ingame_id in holder["slave_joined"]:
+            # already joined, sirf keepalive karte raho
+            break
         try:
             reader, writer = await asyncio.open_connection(ip, int(port))
             writer.write(auth_online)
             await writer.drain()
             writer.write(ka_bytes)
             await writer.drain()
-            _log(f"Tcp Connected => {acct.get('name', tag)}")
+            _log(f"Tcp Connected => {acct.get('name', tag)} (try {cycle+1})")
 
             ka_stop = asyncio.Event()
 
@@ -1562,12 +1568,14 @@ async def slave_loop(acct, holder, match_infos, stop_evt):
                 ka_stop.set()
                 ka_task.cancel()
                 writer.close()
+                await asyncio.sleep(1.0)
                 continue
 
             team_code = holder["team_code"]
             j = br_join_team_pkt(team_code, region, remote_version, key, iv)
-            writer.write(j)
-            await writer.drain()
+
+            # ✅ JOIN packet 5 baar repeat (2s gap) — drop ho toh bhi pahunche
+            join_task = asyncio.create_task(_slave_join_burst(writer, j, repeats=3, gap=2.0))
 
             joined = False
             join_sent_at = time.time()
@@ -1577,10 +1585,9 @@ async def slave_loop(acct, holder, match_infos, stop_evt):
                 try:
                     chunk = await asyncio.wait_for(reader.read(65536), timeout=1.0)
                 except asyncio.TimeoutError:
-                    if not joined and time.time() - join_sent_at > 3:
-                        joined = True
-                        holder["slave_joined"].add(ingame_id)
-                        print(f"  Bot Joined The Team => {acct.get('name', tag)}")
+                    # 4 sec tak koi server frame nahi aaya join ke baad → retry cycle
+                    if not joined and time.time() - join_sent_at > 4:
+                        break
                     continue
                 except Exception:
                     break
@@ -1610,6 +1617,7 @@ async def slave_loop(acct, holder, match_infos, stop_evt):
                     if minfo is not None and tag not in match_infos:
                         match_infos[tag] = minfo
 
+            join_task.cancel()
             ka_stop.set()
             ka_task.cancel()
             writer.close()
@@ -1617,10 +1625,41 @@ async def slave_loop(acct, holder, match_infos, stop_evt):
                 await writer.wait_closed()
             except Exception:
                 pass
-            if stop_evt.is_set():
+
+            if joined or ingame_id in holder["slave_joined"]:
+                # joined — ab sirf wait karo jab tak match_infos na mile
+                if tag in match_infos:
+                    break
+                # match info milne ka wait (max 60s)
+                t0 = time.time()
+                while time.time() - t0 < 60 and not stop_evt.is_set():
+                    if tag in match_infos:
+                        break
+                    await asyncio.sleep(0.5)
                 break
-        except Exception:
+            else:
+                print(f"  🔁 {tag} join fail, reconnecting ({cycle+1}/5)...")
+                await asyncio.sleep(2.0)
+        except Exception as e:
+            _log(f"{tag} slave err: {e}")
             await asyncio.sleep(2.0)
+
+        if stop_evt.is_set():
+            break
+
+
+async def _slave_join_burst(writer, join_pkt, repeats=5, gap=2.0):
+    """Join packet ko multiple baar bhejo jab tak cancel na ho."""
+    try:
+        for _ in range(repeats):
+            try:
+                writer.write(join_pkt)
+                await writer.drain()
+            except Exception:
+                return
+            await asyncio.sleep(gap)
+    except asyncio.CancelledError:
+        pass
 
 
 # ═══════════════ MASTER LOOP ═══════════════
