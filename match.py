@@ -1,7 +1,6 @@
-#═══════════════════════════════════════════════════════════════════════════
-#  match.py — Final (offline + fresh TCP + cache login + auto-repeat ∞)
-#  3 match-end detection fixes applied
-#  Owner: AVI CODEX | Telegram: @AVI_CODEXX
+# ═══════════════════════════════════════════════════════════════════════════
+#  match.py — Match Engine (ALL REGIONS)
+#  Owner: AVI CODEX| Telegram: @AVI_CODEXX
 # ═══════════════════════════════════════════════════════════════════════════
 
 import asyncio
@@ -10,778 +9,168 @@ import struct
 import time
 import json
 import os
+import hashlib
 import math
 import sys
-import random
 import itertools
-import base64
-import re
-import hmac
-import hashlib
-import uuid
-import ssl
-import traceback
-import collections
+import random
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Any
-
-import aiohttp
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
 try:
     from protobuf_decoder.protobuf_decoder import Parser
-    _HAS_PARSER = True
+    HAS_PARSER = True
 except ImportError:
-    _HAS_PARSER = False
+    HAS_PARSER = False
     Parser = None
 
-try:
-    from message_ids import MESSAGE_ID_TO_NAME
-except ImportError:
-    MESSAGE_ID_TO_NAME = {}
-
-try:
-    import StartMatch_pb2
-    _START_MATCH_PROTO = StartMatch_pb2
-except ImportError:
-    _START_MATCH_PROTO = None
-
 from core import (
-    _log,
-    enc_aes, dec_aes,
-    enc_varint, read_varint,
-    ptag, f_vint, f_bytes, f_str,
-    parse_proto, first_value,
-    decode_jwt_payload,
-    build_region_cfg,
-    major_login, get_login_data,
-    load_squad_accounts,
-    _to_bytes,
+    _log, enc_aes, dec_aes, enc_varint, read_varint,
+    ptag, f_vint, f_bytes, f_str, parse_proto, first_value,
+    decode_jwt_payload, build_region_cfg, major_login, get_login_data,
+    load_accounts, load_squad_accounts, _to_bytes,
     HARDCODED_CONFIG, _PLAY_VERSION, _OB_VERSION,
-    REGION_LANG, REGION_GROUP, REGION_LIST,
-    region_byte, region_prefix,
-    get_guest_token as core_get_guest_token,
-    SECRET, APP_ID, CLIENT_TYPE,
-    _normalize_uid,
+    REGION_LANG, REGION_GROUP, region_byte, region_prefix,
+    POSE_STANDING, POSE_DASHING, CHAT_FOLLOW_TRIGGERS,
 )
 
 # ═══════════════ CONSTANTS ═══════════════
-# ═══ CHANGE 1: 3000 → 700 (11.6 min hard cap) ═══
-MAX_MATCH_DURATION      = 700
-# ═══ CHANGE 2: 150.0 → 30.0 (30s idle timeout) ═══
-MATCH_IDLE_TIMEOUT      = 30.0
-HANDSHAKE_TIMEOUT       = 45.0
-EXP_REFRESH_AFTER_MATCH_DELAY = 9.0
-NON_MATCH_RECONNECT_DELAY      = 1.0
-SESSION_RETRY_DELAY            = 3.0
-AFTER_MATCH_COOLDOWN           = 3.0
+MATCH_MAX_LIFETIME = 700.0
+MATCH_INFO_TIMEOUT = 60.0
+SQUAD_PLAYERS = 4
+SETTLE_AFTER_ALL_JOIN = 1.5
+SQUAD_TIMEOUT = 600
 
-BR_MODE_ID = 1
-BR_MAP_ID  = 1
+SEND_HZ = 10.0
+MOVE_INTERVAL = 1.0 / SEND_HZ
+WALK_SPEED = 5150.0
+STEP_PER_TICK = WALK_SPEED / SEND_HZ
+ZONE_RADIUS_SCALE = 1000.0
 
-ANTI_AFK_MIN_INTERVAL = 1.8
-ANTI_AFK_MAX_INTERVAL = 3.5
+CMD_PLAYER_JOIN = 101
+CMD_MATCH_END = 103
+CMD_DEAD = 107
+CMD_SAFE_ZONE = 117
+CMD_SERVER_TIME = 2000
+CMD_MY_STATE = 2001
+CMD_OTHER_STATES = 2012
+CMD_QUICK_CHAT = 551
+CMD_GRI_SYNC = 1901
 
-MATCH_SEARCH_TIMEOUT = 90.0
-MATCH_WATCHDOG_CHECK = 30.0
-REGION_ROTATION_LIST = ["IND", "ID", "SG", "TH", "MY", "VN", "PH"]
-REGION_ROTATE_EVERY_N = 2
-MAX_SEARCH_ATTEMPTS = 25
+PHASE_PREPARE = 1
+PHASE_FIGHT = 3
+QUICK_CHAT_FOLLOW = 1
+QUICK_CHAT_HELP = 2
 
-SAFE_PLAY_MODE        = True
-BYPASS_TIMING_JITTER  = True
-BYPASS_PACKET_JITTER  = True
-BYPASS_HELLO_DELAY    = True
-BYPASS_KA_JITTER      = True
-
-# ═══════════════ NEW MOVEMENT ═══════════════
-AUTO_MOVE_ENABLED = True
-AUTO_MOVE_START_DELAY = 5.0
-AUTO_MOVE_SPAWN_TIMEOUT = 30.0
-AUTO_MOVE_LAND_TIMEOUT = 8.0
-AUTO_MOVE_TICK_INTERVAL = 0.1
-AUTO_MOVE_WALK_SPEED = 352
-AUTO_MOVE_RUN_SPEED = 546
-AUTO_MOVE_RUN_CHANCE = 0.6
-AUTO_MOVE_RADIUS = 6000
-AUTO_MOVE_MIN_LEG = 1500
-AUTO_MOVE_TURN_PER_TICK = 25.0
-AUTO_MOVE_PAUSE_RANGE = (0.6, 2.5)
-AUTO_MOVE_RESYNC_DISTANCE = 2500
-AUTO_MOVE_PIGGYBACK_ACK = True
-AUTO_MOVE_MSG_KEYS = list(range(0x64, 0x6E))
-AUTO_MOVE_DEFAULT_RTT = 120
-
-MSG_PLAYER_STATE_SYNC = 2001
-
-ENABLE_HTTP_PING = True
-PING_INTERVAL    = 20.0
-PING_TIMEOUT     = 8.0
-PING_URL         = "https://loginbp.ppmainecoonghj.com/Ping"
-PING_REAL_IP     = "103.109.214.211"
-
-TEAM_MODE               = True
-TEAM_SIZE               = 4
-TEAM_PEER_WAIT_TIMEOUT  = 12.0
-TEAM_CREATE_WAIT        = 2.0
-TEAM_INVITE_CYCLE_WAIT  = 1.5
-TEAM_INVITE_MAX_TIME    = 12.0
-TEAM_HEARTBEAT_INTERVAL = 3.0
-TEAM_IDLE_ITERS_TEAM    = 1800
-TEAM_MEMBER_START_DELAY = 4.0
-TEAM_FINAL_WAIT         = 3.0
-TEAM_READY_DELAY        = 2.0
-
-FORCED_CLIENT_VERSION = "2.133.13"
-
-# ═══════════════ LOGIN CACHE ═══════════════
-LOGIN_CACHE_FILE = "squad_accounts_cache.json"
-CACHE_TTL = 24 * 3600
-
-_login_cache: Dict[str, dict] = {}
-_login_cache_lock = asyncio.Lock()
+# ═══════════════ DEVICE FINGERPRINT ═══════════════
 
 
-def _load_login_cache_file():
-    global _login_cache
-    if not os.path.exists(LOGIN_CACHE_FILE):
-        _login_cache = {}
-        return
-    try:
-        with open(LOGIN_CACHE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            _login_cache = data
-            print_info(f"[CACHE] loaded {len(_login_cache)} cached login(s) from {LOGIN_CACHE_FILE}")
-        else:
-            _login_cache = {}
-    except Exception as e:
-        print_warning(f"[CACHE] load failed: {e}")
-        _login_cache = {}
+# ── Yeh values login (_build_major_login_pb2) se EXACT match honi chahiye ──
+_DEV_UNIQUE_ID   = "Google|22b9e015-fe56-49f4-8d83-caa66d71ddfc"
+_DEV_MODEL       = "poco 22101320I"
+_DEV_LIBRARY_TOKEN = ("b8e0cd5e295eee42f5860d3c86e483dd|"
+                      "/data/app/~~6Cw028g_ld-8Z0z2qhrOLA==/"
+                      "com.garena.game.ffi-i3wiaEmpx8CbiRVhUMx_ag==/base.apk")
+_CLIENT_VERSION      = "1.132.21"
+_CLIENT_VERSION_CODE = "2019121269"
+
+def build_device_fingerprint(unique_device_id=None, device_model=None,
+                             library_token=None, client_version=None,
+                             client_version_code=None, salt="ff-join") -> str:
+    """
+    32-hex fingerprint — login ke device constants se banega.
+    Server isko session-bound anti-cheat ke liye use karta hai.
+    """
+    uid   = unique_device_id or _DEV_UNIQUE_ID
+    model = device_model     or _DEV_MODEL
+    lib   = (library_token   or _DEV_LIBRARY_TOKEN).split("|", 1)[0]
+    ver   = client_version      or _CLIENT_VERSION
+    code  = client_version_code or _CLIENT_VERSION_CODE
+    raw = "|".join([uid, model, lib, ver, code, salt])
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
-def _save_login_cache_file():
-    try:
-        with open(LOGIN_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(_login_cache, f, indent=2)
-    except Exception as e:
-        print_warning(f"[CACHE] save failed: {e}")
+# ═══════════════ AUTH AES ═══════════════
+AUTH_AES_KEY = bytes([0x19, 0x47, 0xB9, 0x74, 0xD9, 0x73, 0xF3, 0x7F,
+                      0x42, 0x06, 0x01, 0x38, 0x42, 0x00, 0x10, 0x30])
+AUTH_AES_IV = bytes([0x28, 0x7F, 0xCA, 0x7A, 0xF9, 0x67, 0xF3, 0x7A,
+                     0x65, 0x02, 0x01, 0x10, 0x40, 0x40, 0x00, 0x30])
+AUTH_CMD = 0x65
 
 
-def _cache_get(uid: str) -> Optional[dict]:
-    rec = _login_cache.get(str(uid))
-    if not rec:
-        return None
-    if time.time() - rec.get("cached_at", 0) > CACHE_TTL:
-        return None
-    for k in ("account_id", "token", "aes_ak", "iv_i", "game_server", "region"):
-        if k not in rec or not rec[k]:
-            return None
-    rec["cached_at"] = time.time()
-    _login_cache[str(uid)] = rec
-    try:
-        _save_login_cache_file()
-    except Exception:
-        pass
-    return rec
+def build_auth_datagram(token, account_id, region="IND"):
+    payload = token.encode("utf-8") if isinstance(token, str) else token
+    p = 16 - (len(payload) % 16)
+    data = AES.new(AUTH_AES_KEY, AES.MODE_CBC, AUTH_AES_IV).encrypt(
+        payload + bytes([p]) * p)
+    out = bytearray()
+    out.append(AUTH_CMD & 0xFF)
+    out.append(region_byte(region) & 0xFF)
+    out += struct.pack(">Q", int(account_id) & 0xFFFFFFFFFFFFFFFF)
+    out += struct.pack(">I", int(time.time()) & 0xFFFFFFFF)
+    out += struct.pack(">i", len(data))
+    out += data
+    return bytes(out)
 
 
-def _cache_put(uid: str, data: dict):
-    rec = dict(data)
-    rec["cached_at"] = time.time()
-    if isinstance(rec.get("aes_ak"), (bytes, bytearray)):
-        rec["aes_ak"] = rec["aes_ak"].hex()
-    if isinstance(rec.get("iv_i"), (bytes, bytearray)):
-        rec["iv_i"] = rec["iv_i"].hex()
-    _login_cache[str(uid)] = rec
-    _save_login_cache_file()
+async def build_auth_packet(account_id, token, server_time, key, iv,
+                            region="IND", typ="OnLine"):
+    uid_hex = f"{int(account_id):016x}"
+    ts_hex = f"{int(server_time):08x}"
+    enc = AES.new(key, AES.MODE_CBC, iv).encrypt(pad(token.encode(), 16)).hex()
+    enc_len = f"{len(enc) // 2:08x}"
+    pre_on = region_prefix(region, "online")
+    pre_chat = region_prefix(region, "chat")
+    if typ == "OnLine":
+        return bytes.fromhex(pre_on + uid_hex + ts_hex + "00000000" + enc_len + enc)
+    return bytes.fromhex(pre_chat + uid_hex + ts_hex + enc_len + enc)
 
 
-def _cache_hydrate(rec: dict) -> dict:
-    out = dict(rec)
-    try:
-        if isinstance(out.get("aes_ak"), str):
-            out["aes_ak"] = bytes.fromhex(out["aes_ak"])
-        if isinstance(out.get("iv_i"), str):
-            out["iv_i"] = bytes.fromhex(out["iv_i"])
-    except Exception:
-        pass
-    return out
+async def send_keep_alive(region="IND"):
+    return bytes([0x02, region_byte(region) & 0xFF])
 
 
-# ═══════════════ COLORS / PRINT ═══════════════
-class Colors:
-    GREEN='\033[92m'; FAIL='\033[91m'; WARNING='\033[93m'
-    CYAN='\033[96m'; MAGENTA='\033[95m'; WHITE='\033[97m'; ENDC='\033[0m'
-
-def print_colored(t, c=Colors.WHITE):
-    try: print(f"{c}{t}{Colors.ENDC}", flush=True)
-    except Exception: pass
-
-def print_success(t): print_colored(f"[+] {t}", Colors.GREEN)
-def print_error(t):   print_colored(f"[-] {t}", Colors.FAIL)
-def print_warning(t): print_colored(f"[!] {t}", Colors.WARNING)
-def print_info(t):    print_colored(f"[i] {t}", Colors.CYAN)
-
-def banner_team_code(team_code, uid=""):
-    if not team_code: return
-    box_w = 50
-    line = "═" * box_w
-    print_colored(f"╔{line}╗", Colors.GREEN)
-    title = f"  🎯 TEAM CODE: {team_code}  "
-    pad_n = max(0, (box_w - len(title)) // 2)
-    print_colored(f"║{' ' * pad_n}{title}{' ' * (box_w - pad_n - len(title))}║", Colors.GREEN)
-    if uid:
-        s = f"  Leader: {uid}"
-        print_colored(f"║{s:<{box_w}}║", Colors.CYAN)
-    print_colored(f"╚{line}╝", Colors.GREEN)
-
-def bypass_jitter(base, spread=0.35):
-    if not (SAFE_PLAY_MODE and BYPASS_TIMING_JITTER): return base
-    return max(0.05, base + random.uniform(-spread, spread))
-
-def bypass_packet_jitter(base, spread_ratio=0.35):
-    if not (SAFE_PLAY_MODE and BYPASS_PACKET_JITTER): return base
-    return max(0.1, base + random.uniform(-base * spread_ratio, base * spread_ratio))
-
-def bypass_hello_delay():
-    if not (SAFE_PLAY_MODE and BYPASS_HELLO_DELAY): return 0.0
-    return random.uniform(0.05, 0.45)
-
-def bypass_ka_jitter(base=5.0):
-    if not (SAFE_PLAY_MODE and BYPASS_KA_JITTER): return base
-    return max(3.0, base + random.uniform(-0.8, 1.2))
-
-def bypass_human_reconnect_delay(attempt):
-    if not (SAFE_PLAY_MODE and BYPASS_TIMING_JITTER): return min(attempt * 0.5, 2.0)
-    return max(0.05, min(attempt * 0.5, 2.0) + random.uniform(-0.4, 0.7))
-
-# ═══════════════ HTTP / KEYS ═══════════════
-_aiohttp_session = None
-
-async def get_aiohttp_session():
-    global _aiohttp_session
-    if _aiohttp_session is None or _aiohttp_session.closed:
-        _aiohttp_session = aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(ssl=False, limit=100))
-    return _aiohttp_session
-
-AES_KEY = b'Yg&tc%DEuh6%Zc^8'
-AES_IV  = b'6oyZDr22E3ychjM%'
-HEX_KEY = "2ee44819e9b4598845141067b281621874d0d5d7af9d8f7e00c1e54715b7d1e3"
-
+# ═══════════════ UDP CRYPTO ═══════════════
 CRC7_TABLE = bytes([
-    0,9,18,27,36,45,54,63,72,65,90,83,108,101,126,119,25,16,11,2,61,52,47,38,
-    81,88,67,74,117,124,103,110,50,59,32,41,22,31,4,13,122,115,104,97,94,87,76,69,
-    43,34,57,48,15,6,29,20,99,106,113,120,71,78,85,92,100,109,118,127,64,73,82,91,
-    44,37,62,55,8,1,26,19,125,116,111,102,89,80,75,66,53,60,39,46,17,24,3,10,
-    86,95,68,77,114,123,96,105,30,23,12,5,58,51,40,33,79,70,93,84,107,98,121,112,
-    7,14,21,28,35,42,49,56,65,72,83,90,101,108,119,126,9,0,27,18,45,36,63,54,
-    88,81,74,67,124,117,110,103,16,25,2,11,52,61,38,47,115,122,97,104,87,94,69,76,
-    59,50,41,32,31,22,13,4,106,99,120,113,78,71,92,85,34,43,48,57,6,15,20,29,
-    37,44,55,62,1,8,19,26,109,100,127,118,73,64,91,82,60,53,46,39,24,17,10,3,
-    116,125,102,111,80,89,66,75,23,30,5,12,51,58,33,40,95,86,77,68,123,114,105,96,
-    14,7,28,21,42,35,56,49,70,79,84,93,98,107,112,121,
+    0, 9, 18, 27, 36, 45, 54, 63, 72, 65, 90, 83, 108, 101, 126, 119, 25, 16, 11, 2, 61, 52, 47, 38,
+    81, 88, 67, 74, 117, 124, 103, 110, 50, 59, 32, 41, 22, 31, 4, 13, 122, 115, 104, 97, 94, 87,
+    76, 69, 43, 34, 57, 48, 15, 6, 29, 20, 99, 106, 113, 120, 71, 78, 85, 92, 100, 109, 118, 127,
+    64, 73, 82, 91, 44, 37, 62, 55, 8, 1, 26, 19, 125, 116, 111, 102, 89, 80, 75, 66, 53, 60, 39,
+    46, 17, 24, 3, 10, 86, 95, 68, 77, 114, 123, 96, 105, 30, 23, 12, 5, 58, 51, 40, 33, 79, 70,
+    93, 84, 107, 98, 121, 112, 7, 14, 21, 28, 35, 42, 49, 56, 65, 72, 83, 90, 101, 108, 119, 126,
+    9, 0, 27, 18, 45, 36, 63, 54, 88, 81, 74, 67, 124, 117, 110, 103, 16, 25, 2, 11, 52, 61, 38,
+    47, 115, 122, 97, 104, 87, 94, 69, 76, 59, 50, 41, 32, 31, 22, 13, 4, 106, 99, 120, 113, 78,
+    71, 92, 85, 34, 43, 48, 57, 6, 15, 20, 29, 37, 44, 55, 62, 1, 8, 19, 26, 109, 100, 127, 118, 73,
+    64, 91, 82, 60, 53, 46, 39, 24, 17, 10, 3, 116, 125, 102, 111, 80, 89, 66, 75, 23, 30, 5, 12,
+    51, 58, 33, 40, 95, 86, 77, 68, 123, 114, 105, 96, 14, 7, 28, 21, 42, 35, 56, 49, 70, 79, 84,
+    93, 98, 107, 112, 121,
 ])
 _DELTA = 0x9E3779B9
 _ROUNDS = 16
-_FIELD_SIZES = {0:1, 1:2, 2:2, 3:1, 4:2}
-_FIELD_NAMES = {0:"sendOption", 1:"cmd", 2:"orderId", 3:"flags", 4:"length"}
+_FIELD_SIZES = {0: 1, 1: 2, 2: 2, 3: 1, 4: 2}
+_FIELD_NAMES = {0: "sendOption", 1: "cmd", 2: "orderId", 3: "flags", 4: "length"}
+HDR_RELIABLE = 10
+UDP_HEAD_AND_ENCRY_SIZE = 40
+MTU_LIMIT = 1300
+_SALT_LEN, _ZERO_LEN = 2, 7
 
-# ═══════════════ TEAM CODE EXTRACTION ═══════════════
-def extract_team_code_from_bytes(buf: bytes) -> Optional[str]:
-    if not buf or len(buf) < 5: return None
-    m = re.search(rb'\x5a[\x06\x07\x08]([0-9]{6,8})', buf)
-    if m:
-        c = m.group(1).decode('ascii', 'ignore')
-        if c.isdigit() and 6 <= len(c) <= 8: return c
-    m2 = re.search(rb'(?:[\x30-\x39]{7})', buf)
-    if m2:
-        c = m2.group(0).decode('ascii', 'ignore')
-        if c.isdigit() and len(c) == 7: return c
-    try:
-        idx = 0
-        while idx < len(buf) - 4:
-            if buf[idx] == 0x52:
-                length = buf[idx + 1]
-                if 6 <= length <= 8 and idx + 2 + length <= len(buf):
-                    c = buf[idx + 2:idx + 2 + length].decode('ascii', 'ignore')
-                    if c.isdigit() and 6 <= len(c) <= 8: return c
-            idx += 1
-    except Exception: pass
-    return None
-
-def _decode_proto_manual(data):
-    result = {}; offset = 0; dl = len(data)
-    while offset < dl:
-        header = 0; shift = 0
-        while offset < dl:
-            b = data[offset]; offset += 1
-            header |= (b & 0x7F) << shift
-            if not (b & 0x80): break
-            shift += 7
-            if shift > 28: break
-        if header == 0: break
-        fn = header >> 3; wt = header & 0x7
-        if fn == 0: break
-        if wt == 0:
-            v = 0; shift = 0
-            while offset < dl:
-                b = data[offset]; offset += 1
-                v |= (b & 0x7F) << shift
-                if not (b & 0x80): break
-                shift += 7
-                if shift > 63: break
-            result[fn] = v
-        elif wt == 2:
-            length = 0; shift = 0
-            while offset < dl:
-                b = data[offset]; offset += 1
-                length |= (b & 0x7F) << shift
-                if not (b & 0x80): break
-                shift += 7
-                if shift > 28: break
-            if length > dl - offset: break
-            value = data[offset:offset+length]; offset += length
-            try:
-                s = value.decode('utf-8')
-                if s and all(31 < ord(c) < 127 or ord(c) in (9, 10, 13) for c in s):
-                    result[fn] = s
-                else:
-                    nested = _decode_proto_manual(value)
-                    result[fn] = nested if nested else value.hex()
-            except UnicodeDecodeError:
-                nested = _decode_proto_manual(value)
-                result[fn] = nested if nested else value.hex()
-        elif wt == 5: offset += 4
-        elif wt == 1: offset += 8
-        else: break
-    return result
-
-def _wrap_manual(inner):
-    try:
-        alt = _decode_proto_manual(inner)
-        if alt and len(alt) > 0:
-            return {str(k): {"data": v} for k, v in alt.items()}
-    except Exception: pass
-    return None
-
-# ═══════════════ SQUAD GROUP ═══════════════
-class TeamGroup:
-    def __init__(self, gid: int, size: int = TEAM_SIZE):
-        self.gid = gid
-        self.size = max(1, min(int(size), TEAM_SIZE))
-        self.peers: Dict[str, Any] = {}
-        self.leader_uid: Optional[str] = None
-        self.team_code: Optional[str] = None
-        self.pk_code: Optional[str] = None
-        self.members: set = set()
-        self.members_lock = asyncio.Lock()
-        self.lock = asyncio.Lock()
-        self.active = {"flag": True}
-
-    def tag(self) -> str:
-        return f"G{self.gid}"
-
-async def team_member_join(grp: TeamGroup, uid):
-    uid = str(uid)
-    async with grp.members_lock:
-        before = len(grp.members)
-        grp.members.add(uid)
-        after = len(grp.members)
-    if after != before:
-        print_success(f"[TEAM-{grp.tag()}] 👥 In team ({after}/{grp.size}) | joined: {uid}")
-    return after
-
-async def team_member_leave(grp: TeamGroup, uid):
-    async with grp.members_lock:
-        grp.members.discard(str(uid))
-
-async def team_member_count(grp: TeamGroup):
-    async with grp.members_lock:
-        return len(grp.members)
-
-async def team_member_reset(grp: TeamGroup, keep_leader=True):
-    async with grp.members_lock:
-        grp.members.clear()
-        if keep_leader and grp.leader_uid:
-            grp.members.add(grp.leader_uid)
-
-# ═══════════════ MATCH COUNTER ═══════════════
-_match_counters: Dict[str, int] = {}
-_match_counter_lock = asyncio.Lock()
-
-async def _inc_match(uid):
-    async with _match_counter_lock:
-        _match_counters[uid] = _match_counters.get(uid, 0) + 1
-        return _match_counters[uid]
-
-async def _dec_match(uid):
-    async with _match_counter_lock:
-        if uid in _match_counters and _match_counters[uid] > 0:
-            _match_counters[uid] -= 1
-        return _match_counters.get(uid, 0)
-
-async def _get_match_count(uid):
-    async with _match_counter_lock:
-        return _match_counters.get(uid, 0)
-
-# ═══════════════ CRYPTO / PROTOBUF ═══════════════
-async def aes_encrypt(payload, key, iv):
-    return AES.new(key, AES.MODE_CBC, iv).encrypt(pad(payload, AES.block_size))
-
-def encode_varint(n):
-    out = bytearray()
-    if n < 0: n &= 0xFFFFFFFFFFFFFFFF
-    while True:
-        b = n & 0x7F; n >>= 7
-        if n: b |= 0x80
-        out.append(b)
-        if not n: break
-    return bytes(out)
-
-def _pb_varint(fn, val): return encode_varint((fn << 3) | 0) + encode_varint(val)
-def _pb_length(fn, val):
-    enc = val.encode('utf-8') if isinstance(val, str) else val
-    return encode_varint((fn << 3) | 2) + encode_varint(len(enc)) + enc
-
-def create_proto(fields):
-    packet = bytearray()
-    for field, value in fields.items():
-        if isinstance(field, str): field = int(field)
-        if isinstance(value, dict):
-            packet.extend(_pb_length(field, bytes(create_proto(value))))
-        elif isinstance(value, list):
-            for item in value:
-                if isinstance(item, dict): packet.extend(_pb_length(field, bytes(create_proto(item))))
-                elif isinstance(item, str): packet.extend(_pb_length(field, item))
-                elif isinstance(item, (bytes, bytearray)): packet.extend(_pb_length(field, bytes(item)))
-                elif isinstance(item, bool): packet.extend(_pb_varint(field, 1 if item else 0))
-                elif isinstance(item, int): packet.extend(_pb_varint(field, item))
-        elif isinstance(value, bool): packet.extend(_pb_varint(field, 1 if value else 0))
-        elif isinstance(value, int): packet.extend(_pb_varint(field, value))
-        elif isinstance(value, str): packet.extend(_pb_length(field, value))
-        elif isinstance(value, (bytes, bytearray)): packet.extend(_pb_length(field, bytes(value)))
-    return bytes(packet)
-
-def encrypt_api(plain_hex):
-    return AES.new(AES_KEY, AES.MODE_CBC, AES_IV).encrypt(
-        pad(bytes.fromhex(plain_hex), AES.block_size)).hex()
-
-def create_packet(Pk, N, K, V):
-    if isinstance(K, str): K = bytes.fromhex(K) if len(K) == 32 else K.encode()
-    if isinstance(V, str): V = bytes.fromhex(V) if len(V) == 32 else V.encode()
-    PkEnc = AES.new(K, AES.MODE_CBC, V).encrypt(pad(bytes.fromhex(Pk), 16)).hex()
-    L = len(PkEnc) // 2
-    hexlen = hex(L)[2:]
-    if len(hexlen) % 2 != 0: hexlen = '0' + hexlen
-    pad_len = 12 - len(N) - len(hexlen)
-    if pad_len < 0: pad_len = 0
-    return bytes.fromhex(N + ('0' * pad_len) + hexlen + PkEnc)
-
-# ═══════════════ DECODE HELPERS ═══════════════
-def decode_varint(data, offset):
-    result = 0; shift = 0
-    while offset < len(data):
-        byte = data[offset]
-        result |= (byte & 0x7F) << shift
-        offset += 1
-        if not (byte & 0x80): return result, offset
-        shift += 7
-    return None, offset
-
-def decode_zigzag(n: int) -> int:
-    return (n >> 1) ^ (-(n & 1))
-
-def zigzag_decode(n: int) -> int:
-    return (n >> 1) ^ (-(n & 1))
-
-def _parse_results_sync(results):
-    out = {}
-    for r in results:
-        fd = {"wire_type": r.wire_type}
-        if r.wire_type == "varint": fd["data"] = r.data
-        elif r.wire_type in ("string", "bytes"): fd["data"] = r.data
-        elif r.wire_type == "length_delimited":
-            if hasattr(r.data, "results"): fd["data"] = _parse_results_sync(r.data.results)
-            elif isinstance(r.data, list): fd["data"] = _parse_results_sync(r.data)
-            else: fd["data"] = str(r.data)
-        out[str(r.field)] = fd
-    return out
-
-def decode_protobuf_dict(data: bytes) -> dict:
-    if not _HAS_PARSER: return {}
-    try: return _parse_results_sync(Parser().parse(data))
-    except Exception: return {}
-
-async def decode_protobuf(data):
-    if not _HAS_PARSER: return "{}"
-    try:
-        parsed = Parser().parse(data)
-        return json.dumps(_parse_results_sync(parsed))
-    except Exception:
-        return "{}"
-
-# ═══════════════ DNS / SOCKETS ═══════════════
-_DNS_CACHE: Dict[str, Tuple[str, float]] = {}
-_DNS_CACHE_TTL = 300.0
-
-async def resolve_host_cloudflare(hostname):
-    if not hostname: return hostname
-    parts = hostname.split('.')
-    if len(parts) == 4 and all(p.isdigit() for p in parts): return hostname
-    now = time.time()
-    if hostname in _DNS_CACHE:
-        ip, exp = _DNS_CACHE[hostname]
-        if now < exp: return ip
-    try:
-        loop = asyncio.get_running_loop()
-        info = await loop.getaddrinfo(hostname, None, family=socket.AF_INET)
-        if info:
-            ip = info[0][4][0]
-            _DNS_CACHE[hostname] = (ip, now + _DNS_CACHE_TTL)
-            return ip
-    except Exception: pass
-    return hostname
-
-def optimize_tcp_socket(sock):
-    try:
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 131072)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 131072)
-    except Exception: pass
 
 def optimize_udp_socket(sock):
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 262144)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 262144)
-    except Exception: pass
-
-async def safe_close_writer(writer):
-    if not writer: return
-    try:
-        if not writer.is_closing(): writer.close()
-        await asyncio.wait_for(writer.wait_closed(), timeout=1.5)
-    except Exception: pass
-
-# ═══════════════ LOGIN (with cache) ═══════════════
-async def login_via_core(uid, password, region_override=None):
-    uid_s = str(uid)
-
-    async with _login_cache_lock:
-        cached = _cache_get(uid_s)
-    if cached:
-        print_info(f"[CACHE-HIT] {uid_s} using cached login (age {int(time.time()-cached.get('cached_at',0))}s)")
-        return _cache_hydrate(cached)
-
-    region = (region_override or "IND").upper()
-    try:
-        open_id, access_token, platform = await core_get_guest_token(uid, password)
-    except Exception as e:
-        raise RuntimeError(f"guest token failed: {e}")
-    platform = int(platform or 4)
-    cfg_local = build_region_cfg(region)
-    try:
-        login = await asyncio.to_thread(
-            major_login, "[login]", open_id, access_token, cfg_local,
-            platform, region)
-    except Exception as e:
-        raise RuntimeError(f"MajorLogin failed: {e}")
-    jwt = login.get("jwt")
-    if not jwt:
-        raise RuntimeError("MajorLogin returned no JWT")
-    base_url = login.get("game_url") or cfg_local["server_url"]
-    payload = decode_jwt_payload(jwt) if jwt else {}
-    lock_reg = (payload.get("lock_region") or region).upper()
-    if lock_reg != region:
-        region = lock_reg
-        cfg_local = build_region_cfg(region)
-        try:
-            login = await asyncio.to_thread(
-                major_login, "[login]", open_id, access_token, cfg_local,
-                platform, region)
-        except Exception as e:
-            raise RuntimeError(f"MajorLogin (relock) failed: {e}")
-        jwt = login.get("jwt")
-        base_url = login.get("game_url") or cfg_local["server_url"]
-    try:
-        ld = await asyncio.to_thread(
-            get_login_data, "[login]", open_id, access_token, cfg_local,
-            platform, jwt)
-    except Exception as e:
-        raise RuntimeError(f"GetLoginData failed: {e}")
-    aes_ak = _to_bytes(login.get("aes_key") or b"")
-    iv_i   = _to_bytes(login.get("aes_iv") or b"")
-    if not aes_ak or not iv_i:
-        raise RuntimeError("AES key/iv missing from MajorLogin")
-    game_server = ld.get("game_server")
-    if not game_server:
-        raise RuntimeError("game_server missing from GetLoginData")
-    acc_id = login.get("account_id")
-    result = {
-        "account_id": acc_id,
-        "account_id_numeric": int(acc_id) if acc_id else 0,
-        "token": jwt,
-        "server_url": base_url,
-        "aes_ak": aes_ak,
-        "iv_i": iv_i,
-        "region": region,
-        "server_time": login.get("server_time", 0),
-        "game_server": game_server,
-        "chat_server": ld.get("chat_server"),
-        "nickname": ld.get("nickname") or f"Player_{acc_id}",
-        "open_id": open_id,
-        "access_token": access_token,
-        "uid": str(uid),
-        "platform": platform,
-        "client_version": cfg_local.get("remote_version") or FORCED_CLIENT_VERSION,
-        "release_version": cfg_local.get("latest_release_version") or "OB55",
-    }
-
-    async with _login_cache_lock:
-        _cache_put(uid_s, result)
-    print_info(f"[CACHE-SAVE] {uid_s} fresh login cached")
-
-    return result
-
-# ═══════════════ HTTP PING ═══════════════
-async def send_ping(account_id, token, release_version, ping_url=None):
-    try:
-        try: acc = int(account_id)
-        except Exception: acc = 0
-        now_ms = int(time.time() * 1000)
-        payload = struct.pack("<Q", acc & 0xFFFFFFFFFFFFFFFF) + struct.pack("<Q", now_ms & 0xFFFFFFFFFFFFFFFF)
-        req_id = uuid.uuid4().hex[:22]
-        hdrs = {
-            'accept': '*/*', 'accept-encoding': 'deflate, gzip',
-            'authorization': f'Bearer {token}',
-            'content-type': 'application/x-www-form-urlencoded',
-            'releaseversion': release_version or "OB55",
-            'user-agent': 'UnityPlayer/2018.4.12f1',
-            'x-ga': 'v1 1', 'x-ga-sv': str(int(time.time())),
-            'x-railway-edge': 'sin1', 'x-railway-request-id': req_id,
-            'x-real-ip': PING_REAL_IP, 'x-request-start': str(now_ms),
-            'x-unity-version': '2018.4.12f1',
-        }
-        s = await get_aiohttp_session()
-        async with s.post(str(ping_url or PING_URL), headers=hdrs, data=payload,
-                          timeout=aiohttp.ClientTimeout(total=PING_TIMEOUT)) as r:
-            return r.status == 200
-    except Exception: return False
-
-async def ping_worker(account_id, token, release_version, region="IND", ping_url=None, stop_event=None):
-    if not ENABLE_HTTP_PING: return
-    uid_str = str(account_id)
-    try:
-        await asyncio.sleep(5.0 + random.uniform(0, 2.0))
-        while stop_event is None or not stop_event.is_set():
-            await send_ping(uid_str, token, release_version, ping_url)
-            await asyncio.sleep(max(5.0, PING_INTERVAL + random.uniform(-3.0, 3.0)))
-    except asyncio.CancelledError: pass
-
-# ═══════════════ TCP STARTUP ═══════════════
-async def build_tcp_startup_packet(account_id, token, server_time, key, iv, region="IND", typ='OnLine'):
-    uid_hex = f"{int(account_id):016x}"
-    ts_hex = f"{int(server_time):08x}"
-    enc = (await aes_encrypt(token.encode(), key, iv)).hex()
-    enc_len = f"{len(enc)//2:08x}"
-    reg = str(region).upper() if region else "IND"
-    if typ == 'OnLine':
-        pfx = '7219' if reg == 'BD' else ('7214' if reg == 'IND' else '7215')
-        return f"{pfx}{uid_hex}{ts_hex}00000000{enc_len}{enc}"
-    pfx = '8119' if reg == 'BD' else ('8114' if reg == 'IND' else '8115')
-    return f"{pfx}{uid_hex}{ts_hex}{enc_len}{enc}"
-
-async def send_keep_alive(region="IND"):
-    try:
-        reg = str(region).upper() if region else "IND"
-        return bytes.fromhex("0219" if reg == "BD" else ("0214" if reg == "IND" else "0215"))
     except Exception:
-        return bytes.fromhex("0215")
+        pass
 
-# ═══════════════ VARINT / ZIGZAG / ULEB ═══════════════
-async def has_ssan_zig(n):
-    z = (n << 1) & 0xFFFFFFFFFFFFFFFF
-    out = bytearray()
-    while z >= 0x80: out.append((z & 0x7F) | 0x80); z >>= 7
-    out.append(z); return bytes(out)
 
-async def uleb_encode(n):
-    out = bytearray()
-    while True:
-        b = n & 0x7F; n >>= 7
-        if n: b |= 0x80
-        out.append(b)
-        if not n: break
-    return bytes(out)
+async def crc7_buff(crc, buf):
+    c = crc & 0x7F
+    for b in buf:
+        c = CRC7_TABLE[((2 * (c & 0xFF)) ^ (b & 0xFF)) & 0xFF] & 0x7F
+    return c & 0x7F
 
-async def zigzag_encode(n: int) -> bytes:
-    z = (n << 1) if n >= 0 else ((-n) << 1) - 1
-    out = bytearray()
-    while True:
-        b = z & 0x7F; z >>= 7
-        if z: b |= 0x80
-        out.append(b)
-        if not z: break
-    return bytes(out)
 
-# ═══════════════ TEAM PACKETS ═══════════════
-def create_team(key, iv, game_version="1.132.13"):
-    fields = {
-        1: 1, 2: {2: bytes.fromhex("01"), 3: 1, 4: 3, 5: "en",
-            8: {1: "IDC3", 2: 123, 3: "IND"}, 9: 1,
-            10: bytes.fromhex("01090a0b1219202729"), 11: 2, 13: 1,
-            14: {1: "08FBA33B4BABE2790205390333330000009700050092005F72697EB2134DCBB2467625142201040e38e848dc0e748c3f6aa04d81000000ff1113090dcacfa16d",
-                 2: 478, 3: "7e585d55", 4: "y[Z]", 6: 12, 7: "15686677735a7506101c",
-                 8: str(game_version), 9: 3, 10: 1, 11: "03626253513637754174"},
-            19: 329, 21: bytes.fromhex("374f521955"), 24: {1: 21},
-            27: "a_6534489873065906362"}}
-    return create_packet(create_proto(fields).hex(), "0515", key, iv)
-
-def team_fresh(account_id, key, iv):
-    return create_packet(create_proto({1: 72, 2: {1: int(account_id)}}).hex(), "0515", key, iv)
-
-def invite_player_in_team(target_uid, key, iv, region="IND"):
-    return create_packet(create_proto({1: 2, 2: {1: int(target_uid), 2: region, 4: 1}}).hex(),
-                         "0515", key, iv)
-
-def accept_team_invite(target_uid, group_id, key, iv):
-    fields = {1: 4, 2: {1: int(target_uid), 3: int(target_uid),
-        4: bytes.fromhex("0107090a0b120f19202729"), 8: 1,
-        9: {1: "08FBA33B0522052002041B0222220007000C00010004000547E265AE1080779546762514110104076fa2e8770e748c3f6a68ed75000000ff08080500cacfa16d",
-            2: 235, 3: {14: 80, 11: 86}, 4: "{Y\\R", 6: 13, 7: {2: 4},
-            8: "1.132.13", 9: 2, 10: 1, 11: "0362625351"},
-        10: str(group_id),
-        11: {"1": "IDC3", "2": 107, "3": "IND"}, 13: "en", 16: "374f5219",
-        20: {1: 21}, 23: "a_6534489873065906362",
-        24: "https://dl-sg-production.freefiremobile.com/",
-        27: {1: 2, 2: 4}}}
-    return create_packet(create_proto(fields).hex(), "0515", key, iv)
-
-def start_match_team(account_id, key, iv, region="IND"):
-    fields = {1: 9, 2: {1: int(account_id), 7: {1: "IDC3", 2: 410, 3: region}}}
-    return create_packet(create_proto(fields).hex(), "0515", key, iv)
-
-def ready_for_game(uid, key, iv):
-    return create_packet(create_proto({1: 15, 2: {1: uid, 2: 1}}).hex(), "0519", key, iv)
-
-# ═══════════════ START MATCH ═══════════════
-def build_start_match_v2(account_id, uid, name, server_ip_port, udp_key, jwt_token,
-                         match_code="04312", region="IND", mode=5, map_id=41000,
-                         team_size=4, key=None, iv=None, framed=True) -> bytes:
-    fields = {
-        1: int(account_id), 2: str(server_ip_port), 3: str(udp_key),
-        4: str(jwt_token), 5: int(mode), 6: 1, 7: 1, 8: 1, 13: 1,
-        42: str(match_code), 44: 1, 45: int(team_size), 46: int(map_id),
-    }
-    proto_hex = create_proto(fields).hex()
-    if framed and key and iv:
-        return create_packet(proto_hex, "0515", key, iv)
-    return proto_hex
-
-# ═══════════════ UDP TEA ═══════════════
 async def tea_enc(v0, v1, k0, k1, k2, k3):
     s = 0
     for _ in range(_ROUNDS):
@@ -794,6 +183,7 @@ async def tea_enc(v0, v1, k0, k1, k2, k3):
                     ^ (((v0 >> 5) + k3) & 0xFFFFFFFF))) & 0xFFFFFFFF
     return v0, v1
 
+
 async def tea_dec(v0, v1, k0, k1, k2, k3):
     s = (_DELTA * _ROUNDS) & 0xFFFFFFFF
     for _ in range(_ROUNDS):
@@ -805,6 +195,7 @@ async def tea_dec(v0, v1, k0, k1, k2, k3):
                     ^ (((v1 >> 5) + k1) & 0xFFFFFFFF))) & 0xFFFFFFFF
         s = (s - _DELTA) & 0xFFFFFFFF
     return v0, v1
+
 
 async def tea_cbc_encrypt(padded, key_bytes):
     k0, k1, k2, k3 = (struct.unpack_from("<I", key_bytes, o)[0] for o in (0, 4, 8, 12))
@@ -829,6 +220,7 @@ async def tea_cbc_encrypt(padded, key_bytes):
             await asyncio.sleep(0)
     return bytes(out)
 
+
 async def tea_cbc_decrypt(body, key_bytes):
     k0, k1, k2, k3 = (struct.unpack_from("<I", key_bytes, o)[0] for o in (0, 4, 8, 12))
     out = bytearray(len(body))
@@ -852,9 +244,11 @@ async def tea_cbc_decrypt(body, key_bytes):
             await asyncio.sleep(0)
     return bytes(out)
 
+
 async def build_padded(content):
     pad_len = (8 - (len(content) + 10) % 8) % 8
     return bytes([pad_len, 0, 0]) + b"\x00" * pad_len + content + b"\x00" * 7
+
 
 async def oicq_unpad(padded):
     if not padded or len(padded) < 8:
@@ -865,6 +259,7 @@ async def oicq_unpad(padded):
     s = 3 + pad_len
     e = len(padded) - 7
     return padded[s:e] if s < e else b""
+
 
 async def encode_header(layout, so, cmd, oid, flags, length, k, v80):
     out = bytearray()
@@ -878,6 +273,7 @@ async def encode_header(layout, so, cmd, oid, flags, length, k, v80):
             out.append((v >> 8) & 0xFF)
     return bytes(out)
 
+
 async def layouts_from_mask(mask):
     s = str(mask).strip()
     try:
@@ -888,11 +284,6 @@ async def layouts_from_mask(mask):
         ru = [0, 1, 2, 3, 4]
     return ru, [c for c in ru if c != 2]
 
-async def crc7_buff(crc, buf):
-    c = crc & 0x7F
-    for b in buf:
-        c = CRC7_TABLE[((2 * (c & 0xFF)) ^ (b & 0xFF)) & 0xFF] & 0x7F
-    return c & 0x7F
 
 async def build_packet(msg_key, layout, so, cmd, oid, flags, content, key, encrypted=True):
     k = key[0]
@@ -911,6 +302,7 @@ async def build_packet(msg_key, layout, so, cmd, oid, flags, content, key, encry
     packet[1] = await crc7_buff(0, bytes(packet[2:])) & 0x7F
     return bytes(packet)
 
+
 async def build_hello_packet(text, key, layout):
     data = text.encode("utf-8")[:25]
     content = len(data).to_bytes(4, "little") + data + b"\x00" * 9
@@ -923,1172 +315,1797 @@ async def build_hello_packet(text, key, layout):
     packet[1] = await crc7_buff(0, bytes(packet[2:])) & 0x7F
     return bytes(packet).hex()
 
-async def sv_frame(msg_key, layout, so, cmd, oid, flags, content, key, encrypted=True):
-    return await build_packet(msg_key, layout, so, cmd, oid, flags, content, key, encrypted)
 
-async def build_match_startup_packets(token, udp_key, match_code, account_id, block_val,
-                                      server_ip="", region="IND", client_version="1.132.13",
-                                      client_version_code="2019121229", access_token="",
-                                      mode_id=BR_MODE_ID, map_id=BR_MAP_ID):
-    token = token.strip()
-    udp_key = bytes.fromhex(udp_key)
-    match_code = [int(ch) for ch in str(match_code).strip()]
-    thunder_jwt = token[:660] if len(token) > 660 else token
-    sharma_jwt = token[660:] if len(token) > 660 else ""
-    eth = thunder_jwt.encode() if isinstance(thunder_jwt, str) else thunder_jwt
-    esh = sharma_jwt.encode() if isinstance(sharma_jwt, str) else sharma_jwt
-    garena420 = await has_ssan_zig(len(eth)) + eth
-    reg = str(region).upper() if region else "IND"
-    csoversea_block = bytes.fromhex(
-        "ca0163736f7665727365612e7374726f6e67686f6c642e66726565666972656d6f62696c652e636f6d"
-        "3b302e302e302e303b33342e3132362e37362e34353b33342e38372e3137372e31343b33342e38372e"
-        "3137302e3233303b33352e3138352e3138332e35370000000000000100000000000000000000000001"
-        "00000800000100000000000100a8a2d7bebd8d8bdf110200")
-    mid = bytes.fromhex('0000000001000102030101') + await has_ssan_zig(len(reg)) + reg.encode()
-    mid += bytes.fromhex('0001030003000004')
-    mid += await has_ssan_zig(len(client_version)) + client_version.encode()
-    mid += await has_ssan_zig(len(client_version_code)) + client_version_code.encode()
-    mid += csoversea_block
-    clean_ip = server_ip.split(':')[0] if server_ip else "0.0.0.0"
-    mid += await has_ssan_zig(len(clean_ip)) + clean_ip.encode()
-    if access_token:
-        clean_acc = access_token.strip()
-        mid += await has_ssan_zig(len(clean_acc)) + clean_acc.encode()
-    mid += await has_ssan_zig(len(esh)) + esh
-    tg = (await uleb_encode(int(account_id)) + await uleb_encode(int(block_val)) +
-          await uleb_encode(1) + await uleb_encode(int(mode_id)) +
-          await uleb_encode(int(block_val)) + await uleb_encode(int(map_id)) + mid)
-    process = await sv_frame(0x5E, match_code, 2, 447, 0, 1, garena420, udp_key)
-    loading = await sv_frame(0x5A, match_code, 2, 448, 1, 1, tg, udp_key)
-    return process.hex(), loading.hex()
+# ═══════════════ VARINT PRIMITIVES ═══════════════
+def _put_varint(out, v):
+    v = int(v)
+    while v >= 0x80:
+        out.append((v & 0x7F) | 0x80)
+        v >>= 7
+    out.append(v & 0x7F)
 
-async def classify(frame):
-    cmd = frame["cmd"]
-    name = MESSAGE_ID_TO_NAME.get(cmd, f"UNKNOWN_{cmd}")
-    if name == "UDP_HELLO": return "HELLO"
-    if name == "UDP_ACK": return "ACK"
-    if name == "UDP_PING": return "PING"
-    if name == "RUDP_JOIN_MATCH": return "JOIN_MATCH"
-    if name.startswith("RUDP_"): return name
-    if name.startswith("UDP_"): return name
-    return "DATA"
 
-async def reply_for(frame, key, mask, ack_key=0x68, ping_key=0x6D, hello_key=0x5B, ack_style="short"):
-    _, nr = await layouts_from_mask(mask)
-    typ = await classify(frame)
-    if typ == "HELLO":
-        if ack_style == "echo":
-            content = frame["content"] if frame["content"] else b"\x10\x00\x00\x00"
-            return typ, await build_packet(hello_key, nr, 1, 1, None, 1, content, key)
-        return typ, await build_packet(ack_key, nr, 0, 2, None, 1, b"\x01\x00", key)
-    if typ == "ACK":
-        content = frame["content"] if frame["content"] else b"\x01\x00"
-        return typ, await build_packet(ack_key, nr, 0, 2, None, 1, content, key)
-    if typ == "PING":
-        c = frame["content"]
-        counter = c[:4] if len(c) >= 4 else c
-        return typ, await build_packet(ping_key, nr, 0, 3, None, 0, counter + b"\x00\x00\x00", key, encrypted=False)
-    if typ == "JOIN_MATCH":
-        return typ, await build_packet(ack_key, nr, 0, 2, None, 1, b"\x02\x00", key)
-    return typ, None
+def _put_zigvarint(out, v):
+    z = (int(v) << 1) ^ (int(v) >> 63)
+    _put_varint(out, z & 0xFFFFFFFFFFFFFFFF)
 
-async def keepalive_ping(sock, ip, port, key_bytes, mask, stop_event):
-    nr = (await layouts_from_mask(mask))[1]
-    ping_keys = [0x66, 0x6D, 0x69, 0x6C, 0x6B, 0x6E, 0x6F, 0x70]
-    loop = asyncio.get_event_loop(); i = 0
-    while not stop_event.is_set():
-        pk = ping_keys[i % len(ping_keys)]
-        counter = int(time.time() * 1000) & 0xFFFFFFFF
-        pkt = await build_packet(pk, nr, 0, 3, None, 0, struct.pack("<I", counter) + b"\x00\x00\x00",
-                                 key_bytes, encrypted=False)
-        try: await loop.sock_sendto(sock, pkt, (ip, port))
-        except Exception: pass
+
+def _put_float_bits(out, f):
+    bits = struct.unpack("<I", struct.pack("<f", float(f)))[0]
+    _put_varint(out, bits)
+
+
+def _put_string(out, s):
+    raw = s.encode("utf-8") if isinstance(s, str) else s
+    _put_zigvarint(out, len(raw))
+    out += raw
+
+
+def _rd_varint(b, p):
+    v = i = 0
+    while True:
+        c = b[p + i]
+        v |= (c & 0x7F) << (7 * i)
         i += 1
-        try: await asyncio.wait_for(stop_event.wait(), timeout=bypass_packet_jitter(3.0, 0.4))
-        except asyncio.TimeoutError: pass
+        if not c & 0x80:
+            return v, p + i
+
+
+def _zag(v):
+    return (v >> 1) ^ -(v & 1)
+
+
+# ═══════════════ JOIN / SPLIT TOKEN ═══════════════
+def _tea_encrypt_len(n):
+    t = 1 + _SALT_LEN + n + _ZERO_LEN
+    r = t % 8
+    return t + (8 - r if r else 0)
+
+
+def _dg_size(token_len, reliable=True):
+    zv = bytearray()
+    _put_zigvarint(zv, token_len)
+    body = len(zv) + token_len
+    return (HDR_RELIABLE if reliable else 8) + _tea_encrypt_len(body)
+
+
+def split_token_bytes(token_bytes):
+    n = len(token_bytes)
+    raw = int(n * 0.85)
+    p1 = raw - (raw % 40)
+    while UDP_HEAD_AND_ENCRY_SIZE + _dg_size(p1) > MTU_LIMIT and p1 > 40:
+        p1 -= 40
+    return token_bytes[:p1], token_bytes[p1:]
+
+
+
+
+# ═══════════════ JOIN HEAD (unchanged) ═══════════════
+def build_join_info_head(account_id, game_mode=15, match_mode=1, map_id=1,
+                         country="IND", client_version="1.132.21",
+                         client_version_code="2019121269",
+                         client_url=("csoversea.stronghold.freefiremobile.com;"
+                                     "0.0.0.0;34.126.76.45;34.87.177.14;"
+                                     "34.87.170.230;35.185.183.57"),
+                         room_id=0, match_id=0,
+                         drift_bottle_owner_id=0, drift_bottle_owner_name="",
+                         enable_antihack_tick=1, friend_count=0,
+                         client_ip="", client_fingerprint="",
+                         session_tag=0, is_emulator=0):
+    room = int(match_id or room_id)
+    b = bytearray()
+    _put_varint(b, int(account_id))
+    _put_varint(b, room)
+    b.append(1)
+    b.append(int(game_mode) & 0xFF)
+    _put_varint(b, room)
+    b.append(int(map_id) & 0xFF)
+    b.append(0); _put_varint(b, 0); _put_varint(b, 0); b.append(0)
+    b.append(int(is_emulator) & 0xFF)
+    b.append(0); b.append(1); b.append(2); b.append(3)
+    b.append(int(enable_antihack_tick) & 0xFF)
+    b.append(1)
+    _put_string(b, country)
+    _put_varint(b, 0)
+    b.append(1); b.append(2); b.append(0); b.append(1); b.append(0); b.append(0); b.append(4)
+    _put_string(b, client_version)
+    _put_string(b, client_version_code)
+    _put_string(b, client_url)
+    b.append(0); b.append(0)
+    _put_varint(b, int(friend_count))
+    b.append(0)
+    _put_varint(b, int(drift_bottle_owner_id))
+    _put_string(b, drift_bottle_owner_name or "")
+    b.append(1)
+    _put_string(b, ""); _put_string(b, "")
+    b.append(0)
+    _put_varint(b, 0); _put_varint(b, 0)
+    b.append(0); b.append(0); b.append(0)
+    _put_varint(b, 0)
+    _put_string(b, "")
+    _put_varint(b, 0)
+    b.append(0); b.append(1); b.append(0); b.append(0)
+    _put_varint(b, 0); _put_varint(b, 0)
+    b.append(0); b.append(1)
+    _put_string(b, "")
+    _put_varint(b, 0)
+    b.append(0); b.append(0); b.append(0)
+    b.append(int(match_mode) & 0xFF)
+    b.append(0)
+    _put_varint(b, int(session_tag))
+    b.append(2); b.append(0)
+    _put_string(b, client_ip or "")
+    _put_string(b, client_fingerprint or "")   # 👈 fingerprint yahan jaata hai
+    return bytes(b)
+
+
+def build_join_post_body(account_id, token_part2, **kw):
+    body = bytearray()
+    body += build_join_info_head(account_id, **kw)
+    _put_string(body, token_part2)
+    return bytes(body)
+
+
+# ═══════════════ MATCH STARTUP — fingerprint injected ═══════════════
+async def build_join_match_startup(join_token, udp_key, match_code, account_id, block_val,
+                                   server_ip="", region="IND",
+                                   client_version=_CLIENT_VERSION,
+                                   client_version_code=_CLIENT_VERSION_CODE,
+                                   access_token="", match_id=0, country="IND",
+                                   map_id=1, game_mode=15, match_mode=1,
+                                   unique_device_id=None, device_model=None,
+                                   library_token=None):
+    join_token = join_token.strip()
+    udp_key_b = bytes.fromhex(udp_key)
+    match_code = [int(c) for c in str(match_code).strip()]
+    enc_token = join_token.encode("utf-8") if isinstance(join_token, str) else join_token
+    part1, part2 = split_token_bytes(enc_token)
+
+    # 🔑 device fingerprint banao (login ke same constants se)
+    fp = build_device_fingerprint(
+        unique_device_id=unique_device_id,
+        device_model=device_model,
+        library_token=library_token,
+        client_version=client_version,
+        client_version_code=client_version_code,
+    )
+
+    prepare_body = bytearray()
+    _put_string(prepare_body, part1)
+    prepare_pkt = (await build_packet(0x5E, match_code, 2, 447, 0, 1,
+                                      bytes(prepare_body), udp_key_b)).hex()
+
+    post_body = build_join_post_body(
+        account_id, part2,
+        game_mode=game_mode, match_mode=match_mode, map_id=map_id,
+        country=country,
+        client_version=client_version,
+        client_version_code=client_version_code,
+        match_id=int(match_id or block_val),
+        client_ip=server_ip.split(":")[0] if server_ip else "",
+        client_fingerprint=fp,     # 👈 NEW
+        is_emulator=0,             # 👈 real device
+    )
+    post_pkt = await build_packet(0x5A, match_code, 2, 448, 1, 1, post_body, udp_key_b)
+    return [prepare_pkt], post_pkt.hex()
+
 
 async def decode_packet(packet, key, mask=None):
     data = bytes(packet) if isinstance(packet, bytes) else bytes.fromhex(packet)
-    if len(data) < 8: return None
+    if len(data) < 8:
+        return None
     k = key[0]
     v80 = ((k << 8) | k) & 0xFFFF
     crc_ok = (data[1] & 0x7F) == await crc7_buff(0, data[2:])
-    candidates = []
     if mask:
         ru, nr = await layouts_from_mask(mask)
         layouts = [("RUDP", ru), ("nonRUDP", nr)]
     else:
-        layouts = [("RUDP", list(p)) for p in itertools.permutations([0,1,2,3,4])]
-        layouts += [("nonRUDP", list(p)) for p in itertools.permutations([0,1,3,4])]
+        layouts = [("RUDP", list(p)) for p in itertools.permutations([0, 1, 2, 3, 4])]
+        layouts += [("nonRUDP", list(p)) for p in itertools.permutations([0, 1, 3, 4])]
+    cands = []
     for kind, layout in layouts:
-        off = 2; f = {}; ok = True
+        off = 2
+        f = {}
+        ok = True
         for code in layout:
             size = _FIELD_SIZES[code]
-            if off + size > len(data): ok = False; break
-            f[_FIELD_NAMES[code]] = ((data[off] ^ k) if size == 1
-                                    else ((data[off] | (data[off+1] << 8)) ^ v80) & 0xFFFF)
+            if off + size > len(data):
+                ok = False
+                break
+            f[_FIELD_NAMES[code]] = (data[off] ^ k) if size == 1 else \
+                ((data[off] | (data[off + 1] << 8)) ^ v80) & 0xFFFF
             off += size
-        if not ok: continue
-        if f["flags"] > 7 or f["sendOption"] > 7: continue
-        if f["length"] != len(data) - off: continue
+        if not ok:
+            continue
+        if f["flags"] > 7 or f["sendOption"] > 7:
+            continue
+        if f["length"] != len(data) - off:
+            continue
         body = data[off:off + f["length"]]
         content = None
         if f["flags"] & 1:
-            if len(body) < 8 or len(body) % 8 != 0: continue
+            if len(body) < 8 or len(body) % 8 != 0:
+                continue
             content = await oicq_unpad(await tea_cbc_decrypt(body, key))
-            if content is None: continue
-        else: content = body
+            if content is None:
+                continue
+        else:
+            content = body
         score = (1 if crc_ok else 0) + (1 if content is not None else 0)
-        candidates.append({"kind": kind, "layout": layout, "headerLen": off,
-                          "msgKey": data[0], "cmd": f["cmd"], "flags": f["flags"],
-                          "sendOption": f["sendOption"], "orderId": f.get("orderId"),
-                          "length": f["length"], "content": content,
-                          "crcOk": crc_ok, "score": score})
-    if not candidates: return None
-    candidates.sort(key=lambda c: c["score"], reverse=True)
-    return candidates[0]
+        cands.append({"kind": kind, "layout": layout, "headerLen": off,
+                      "msgKey": data[0], "cmd": f["cmd"], "flags": f["flags"],
+                      "sendOrder": f["sendOption"], "orderId": f.get("orderId"),
+                      "length": f["length"], "content": content,
+                      "crcOk": crc_ok, "score": score})
+    if not cands:
+        return None
+    cands.sort(key=lambda c: c["score"], reverse=True)
+    return cands[0]
 
-# ═══════════════ NEW MOVEMENT (MoveState) ═══════════════
-def read_varint_safe(data: bytes, offset: int) -> Tuple[int, int]:
-    r, s = 0, 0
-    while True:
-        b = data[offset]
-        offset += 1
-        r |= (b & 0x7F) << s
-        if not (b & 0x80): break
-        s += 7
-    return r, offset
 
-def read_varints(buf):
-    out = []
-    off = 0
-    while off < len(buf):
-        v, off = read_varint_safe(buf, off)
-        out.append(v)
-    return out
+# ═══════════════ STATE BUILDERS ═══════════════
+def build_player_state_upload(player_id, pos, rot, tdir, vel, aim_float,
+                              server_time, physx_state=0, physx_pose=0,
+                              platform=0, low_grav=0, ping=0,
+                              jump=0, slide=0, custom=0):
+    o = bytearray()
+    _put_varint(o, int(player_id))
+    _put_zigvarint(o, pos[0]); _put_zigvarint(o, pos[1]); _put_zigvarint(o, pos[2])
+    _put_zigvarint(o, rot[0]); _put_zigvarint(o, rot[1]); _put_zigvarint(o, rot[2])
+    _put_zigvarint(o, tdir[0]); _put_zigvarint(o, tdir[1])
+    _put_zigvarint(o, vel[0]); _put_zigvarint(o, vel[1]); _put_zigvarint(o, vel[2])
+    o.append(physx_state & 0xFF)
+    o.append(physx_pose & 0xFF)
+    _put_float_bits(o, aim_float[0])
+    _put_float_bits(o, aim_float[1])
+    _put_float_bits(o, aim_float[2])
+    _put_varint(o, platform)
+    o.append(1 if low_grav else 0)
+    _put_varint(o, ping)
+    o.append(jump & 0xFF)
+    _put_varint(o, slide)
+    o.append(custom & 0xFF)
+    _put_varint(o, server_time & 0xFFFFFFFF)
+    return bytes(o)
 
-def float_to_u32(f):
-    return struct.unpack("<I", struct.pack("<f", float(f) + 0.0))[0]
 
-class MoveState:
-    def __init__(self):
-        self.session_start = time.time()
-        self.slot = None
+# ═══════════════ DECODERS ═══════════════
+def parse_player_join(body):
+    if body is None or len(body) < 4:
+        return None
+    try:
+        p = 0
+        user_id, p = _rd_varint(body, p)
+        _samo, p = _rd_varint(body, p)
+        player_id, p = _rd_varint(body, p)
+        raw_len, p = _rd_varint(body, p)
+        n = _zag(raw_len)
+        name = body[p:p + n].decode("utf-8", "replace")
+    except (IndexError, ValueError):
+        return None
+    return user_id, player_id, name
+
+
+def decode_my_state(body):
+    if body is None or len(body) < 6:
+        return None
+    try:
+        p = 0
+        _mt, p = _rd_varint(body, p)
+        _cnt, p = _rd_varint(body, p)
+        p += 1
+        x, p = _rd_varint(body, p)
+        y, p = _rd_varint(body, p)
+        z, p = _rd_varint(body, p)
+    except (IndexError, ValueError):
+        return None
+    return (_zag(x), _zag(y), _zag(z))
+
+
+def decode_players_v2(body):
+    players = {}
+    if body is None or len(body) < 4:
+        return players
+    p = 2
+    while p < len(body) - 1:
+        try:
+            short_id = body[p]; p += 1
+            x, p = _rd_varint(body, p); y, p = _rd_varint(body, p); z, p = _rd_varint(body, p)
+            vx, p = _rd_varint(body, p); vy, p = _rd_varint(body, p); vz, p = _rd_varint(body, p)
+            yrot = body[p]; p += 1
+            aim_y = body[p]; p += 1
+            aim_xz = body[p]; p += 1
+            pstate = body[p]; p += 1
+            ppose = body[p]; p += 1
+            _plat, p = _rd_varint(body, p)
+            _cust = body[p]; p += 1
+        except (IndexError, ValueError):
+            break
+        pos = (_zag(x), _zag(y), _zag(z))
+        if not (1 <= short_id <= 64):
+            break
+        if any(abs(v) > 4000000 for v in pos):
+            break
+        players[short_id] = {
+            "pos": pos, "vel": (_zag(vx), _zag(vy), _zag(vz)),
+            "yrot": yrot, "aim_y": aim_y, "aim_xz": aim_xz,
+            "physx_state": pstate, "physx_pose": ppose,
+        }
+    return players
+
+
+def decode_server_time(body):
+    if not body:
+        return None
+    try:
+        tick, p = _rd_varint(body, 0)
+        phase = body[p] if p < len(body) else 0
+    except (IndexError, ValueError):
+        return None
+    return tick, phase
+
+
+def _read_vec2pos(b, p):
+    x, p = _rd_varint(b, p); z, p = _rd_varint(b, p)
+    return (_zag(x), _zag(z)), p
+
+
+def decode_safezone(body):
+    if not body:
+        return None
+    try:
+        p = 0
+        stage = body[p]; p += 1
+        outer_center, p = _read_vec2pos(body, p)
+        outer_radius, p = _rd_varint(body, p)
+        inner_center, p = _read_vec2pos(body, p)
+        inner_radius, p = _rd_varint(body, p)
+        _tst = body[p] if p < len(body) else 0; p += 1
+        start_time, p = _rd_varint(body, p)
+        end_time, p = _rd_varint(body, p)
+    except (IndexError, ValueError):
+        return None
+    return {"stage": stage, "outer_center": outer_center, "outer_radius": outer_radius,
+            "inner_center": inner_center, "inner_radius": inner_radius,
+            "start": start_time, "end": end_time}
+
+
+def parse_gri_block(body):
+    if body is None or len(body) < 2:
+        return {}
+    try:
+        block_len = struct.unpack_from("<H", body, 0)[0]
+    except struct.error:
+        return {}
+    p = 2
+    end = min(2 + block_len, len(body))
+    fields = {}
+    while p < end:
+        fid = body[p]; p += 1
+        if p >= end:
+            break
+        try:
+            v, p = _rd_varint(body, p)
+        except (IndexError, ValueError):
+            break
+        fields[fid] = v
+    return fields
+
+
+def get_match_phase(body):
+    fields = parse_gri_block(body)
+    if 3 not in fields:
+        return None
+    value = fields[3]
+    if value < 0x10000:
+        return None
+    phase = (value >> 16) & 0xFFFF
+    start = (value >> 32) & 0xFFFFFFFF
+    end = value & 0xFFFF
+    return phase, fields.get(2), start, end
+
+
+def decode_quick_chat(body):
+    if body is None or len(body) < 3:
+        return None
+    try:
+        p = 0
+        chat_id, p = _rd_varint(body, p)
+        _item, p = _rd_varint(body, p)
+        sender, p = _rd_varint(body, p)
+    except (IndexError, ValueError):
+        return None
+    return chat_id, sender & 0xFF, sender
+
+
+# ═══════════════ MOVEMENT STATE ═══════════════
+class MovementState:
+    def __init__(self, account_id):
+        self.account_id = int(account_id)
+        self.my_id = None
+        self.my_short = None
+        self.my_pos = None
         self.server_pos = None
-        self.server_physx_state = None
-        self.server_vel_y = 0
-        self.server_update_seq = 0
-        self.pending_ack = None
-        self.rtt_ms = None
-        self.ping_sent = {}
-        self.cmd_counts = collections.Counter()
-        self.undecoded = 0
-        self.last_2001_head = None
+        self.target_short = None
+        self.target_pos = None
+        self.target_seen = None
+        self.target_vel = (0.0, 0.0)
+        self.target_pose = 0
+        self.target_state = 0
+        self.target_yrot = 0
+        self.target_aim_y = 0
+        self.target_aim_xz = 0
+        self.zone_center = None
+        self.zone_radius = 0.0
+        self.phase = None
+        self.round_no = None
+        self.server_tick = None
+        self.tick_local = None
+        self.tick_rate = 30.0
+        self.alive = True
+        self.downed = {}
+        self.roster = {}
+        self.joined_at = None
+        self.blocked = 0
+        self.yaw = 0.0
+        self.orbit_angle = 0.0
 
-    def diagnostics(self):
-        top = ", ".join(f"{c}x{n}" for c, n in self.cmd_counts.most_common(12)) or "none"
-        return (f"cmds [{top}] | undecoded {self.undecoded} | 2001 {self.server_update_seq} | slot {self.slot}")
+    def teammates(self):
+        if self.my_id is None:
+            return set()
+        team = (self.my_id >> 24) & 0xFF
+        return {s for s, (fid, _) in self.roster.items()
+                if (fid >> 24) & 0xFF == team and s != self.my_short}
 
-    def on_server_frame(self, frame):
-        self.cmd_counts[frame["cmd"]] += 1
-        if frame.get("kind") == "RUDP" and frame.get("orderId") is not None:
-            oid = frame["orderId"]
-            if self.pending_ack is None or ((oid - self.pending_ack) & 0xFFFF) < 0x8000:
-                self.pending_ack = oid
-        if frame["cmd"] == MSG_PLAYER_STATE_SYNC:
-            self._on_own_state(frame["content"] or b"")
-        elif frame["cmd"] == 3:
-            c = frame["content"] or b""
-            if len(c) >= 4:
-                sent = self.ping_sent.pop(struct.unpack_from("<I", c, 0)[0], None)
-                if sent is not None:
-                    self.rtt_ms = int((time.time() - sent) * 1000)
+    def set_identity(self, full_id):
+        self.my_id = int(full_id)
+        self.my_short = self.my_id & 0xFF
+        if self.joined_at is None:
+            self.joined_at = time.time()
 
-    def _on_own_state(self, content):
-        try:
-            v = read_varints(content)
-        except Exception:
-            self.last_2001_head = f"unparseable {content[:12].hex()}"
+    def add_player(self, full_id, name):
+        self.roster[int(full_id) & 0xFF] = (int(full_id), name)
+
+    def name_of(self, short):
+        entry = self.roster.get(short)
+        return entry[1] if entry else "?"
+
+    def seed_my_pos(self, pos):
+        self.server_pos = pos
+        if self.my_pos is None:
+            self.my_pos = pos
+            self.blocked = 0
             return
-        self.last_2001_head = v[:4]
-        if len(v) < 16 or v[0] != 0 or v[1] != 2:
-            return
-        self.slot = v[2]
-        self.server_pos = (zigzag_decode(v[3]), zigzag_decode(v[4]), zigzag_decode(v[5]))
-        self.server_vel_y = zigzag_decode(v[12])
-        self.server_physx_state = v[14]
-        self.server_update_seq += 1
+        dx = pos[0] - self.my_pos[0]
+        dz = pos[2] - self.my_pos[2]
+        gap = math.sqrt(dx * dx + dz * dz)
+        if gap > 120000.0:
+            self.my_pos = pos
+            self.blocked = 0
+        elif gap > 1500.0:
+            self.blocked += 1
+            if self.blocked >= 5:
+                self.my_pos = pos
+                self.blocked = 0
+        else:
+            self.blocked = 0
 
-async def build_player_state_sync_2001(key_bytes, mask, msg_key, slot, pos, stick, move_input, vel,
-                                       physx_state, physx_pose, facing, net_tick, counter_ms, ack_order=None):
-    body = bytearray()
-    body += await uleb_encode((1 << 24) | int(slot))
-    for value in (*pos, *stick, *move_input, *vel):
-        body += await zigzag_encode(int(round(value)))
-    body += await uleb_encode(int(physx_state))
-    body += await uleb_encode(int(physx_pose))
-    for f in facing:
-        body += await uleb_encode(float_to_u32(f))
-    body += b"\x00\x00"
-    body += await uleb_encode(int(net_tick))
-    body += b"\x00\x00\x00"
-    body += await uleb_encode(int(counter_ms))
-    body = bytes(body)
-    k = key_bytes[0]
-    v80 = ((k << 8) | k) & 0xFFFF
-    flags = 4 if ack_order is not None else 0
-    nr = (await layouts_from_mask(mask))[1]
-    hdr = bytearray([msg_key & 0xFF, 0])
-    hdr += await encode_header(nr, 0, MSG_PLAYER_STATE_SYNC, None, flags, len(body), k, v80)
-    if ack_order is not None:
-        a = ((int(ack_order) & 0xFFFF) ^ v80) & 0xFFFF
-        hdr += bytes([a & 0xFF, a >> 8, k])
-    packet = bytearray(hdr + body)
-    packet[1] = await crc7_buff(0, bytes(packet[2:])) & 0x7F
-    return bytes(packet)
-
-async def auto_move_loop(sock, ip, port, key_bytes, mask, state, stop_event, label=""):
-    loop = asyncio.get_event_loop()
-
-    async def wait(sec):
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=sec)
-            return True
-        except asyncio.TimeoutError:
+    def set_target(self, short):
+        if self.my_short is not None and short == self.my_short:
             return False
+        if short != self.target_short:
+            self.target_pos = None
+        self.target_vel = (0.0, 0.0)
+        self.target_seen = None
+        self.target_short = short
+        return True
 
-    next_report = time.time() + AUTO_MOVE_SPAWN_TIMEOUT
-    landed_deadline = None
-    while True:
-        if state.slot is not None and state.server_pos is not None:
-            if landed_deadline is None:
-                landed_deadline = time.time() + AUTO_MOVE_LAND_TIMEOUT
-            if (state.server_physx_state == 0 and state.server_vel_y == 0) or time.time() > landed_deadline:
-                break
-        elif time.time() > next_report:
-            _log(f"[MOVE]{label} waiting own-state: {state.diagnostics()}")
-            next_report = time.time() + AUTO_MOVE_SPAWN_TIMEOUT
-        if await wait(0.2):
-            return
-    if await wait(AUTO_MOVE_START_DELAY):
+    def update_target(self, info, now):
+        prev_pos, prev_seen = self.target_pos, self.target_seen
+        self.target_pos = info["pos"]
+        self.target_seen = now
+        if prev_pos is not None and prev_seen is not None:
+            dt = now - prev_seen
+            if 0.01 < dt < 2.0:
+                vx = (info["pos"][0] - prev_pos[0]) / dt
+                vz = (info["pos"][2] - prev_pos[2]) / dt
+                if abs(vx) < 30000 and abs(vz) < 30000:
+                    self.target_vel = (vx, vz)
+        self.target_yrot = info.get("yrot", self.target_yrot)
+        self.target_aim_y = info.get("aim_y", self.target_aim_y)
+        self.target_aim_xz = info.get("aim_xz", self.target_aim_xz)
+        self.target_state = info.get("physx_state", self.target_state)
+        self.target_pose = info.get("physx_pose", self.target_pose)
+
+    def sync_clock(self, tick, now):
+        if self.server_tick is not None and self.tick_local is not None:
+            dt = now - self.tick_local
+            dtick = tick - self.server_tick
+            if dt > 0.5 and 0 < dtick < 10000:
+                self.tick_rate = self.tick_rate * 0.7 + (dtick / dt) * 0.3
+        self.server_tick = tick
+        self.tick_local = now
+
+    def server_time(self, now):
+        if self.server_tick is None:
+            if self.joined_at is None:
+                return 0
+            return int((now - self.joined_at) * 1000.0) & 0xFFFFFFFF
+        elapsed = now - self.tick_local
+        ticks = self.server_tick + elapsed * self.tick_rate
+        return int(ticks * 1000.0 / self.tick_rate) & 0xFFFFFFFF
+
+
+class MovementPlanner:
+    def __init__(self, step=STEP_PER_TICK, orbit_fraction=0.55, orbit_speed=6.0,
+                 auto_zone=True, move_in_prepare=True, stick_dist=150.0,
+                 max_step=None, coast_limit=3.0):
+        self.step = float(step)
+        self.max_step = float(max_step or step * 1.25)
+        self.orbit_fraction = float(orbit_fraction)
+        self.orbit_speed = float(orbit_speed)
+        self.auto_zone = bool(auto_zone)
+        self.move_in_prepare = bool(move_in_prepare)
+        self.stick_dist = float(stick_dist)
+        self.coast_limit = float(coast_limit)
+        self._last_yaw = 0.0
+
+    def next_yaw(self):
+        return self._last_yaw
+
+    def aim_point(self, st, now):
+        rescue = self._rescue_point(st)
+        if rescue is not None:
+            return rescue
+        target = self._target_point(st, now)
+        zone = self._zone_point(st)
+        if target is None:
+            return zone
+        if zone is not None and self._outside_zone(st, target):
+            return zone
+        return target
+
+    def _target_point(self, st, now):
+        if st.target_pos is None:
+            return None
+        if st.target_seen is not None:
+            gap = now - st.target_seen
+            if 0.05 < gap < self.coast_limit:
+                vx, vz = st.target_vel
+                return (st.target_pos[0] + vx * gap,
+                        st.target_pos[1],
+                        st.target_pos[2] + vz * gap)
+        return st.target_pos
+
+    def _rescue_point(self, st):
+        if not st.downed or st.my_pos is None:
+            return None
+        best, best_d = None, None
+        for pos in st.downed.values():
+            if pos is None:
+                continue
+            dx = pos[0] - st.my_pos[0]
+            dz = pos[2] - st.my_pos[2]
+            d = math.sqrt(dx * dx + dz * dz)
+            if best_d is None or d < best_d:
+                best, best_d = pos, d
+        return best
+
+    def _zone_point(self, st):
+        if not self.auto_zone or st.zone_center is None or st.zone_radius <= 0:
+            return None
+        cx, cz = st.zone_center[0], st.zone_center[-1]
+        y = st.my_pos[1] if st.my_pos else 0
+        ring = st.zone_radius * self.orbit_fraction
+        if st.my_pos is not None:
+            dx = st.my_pos[0] - cx
+            dz = st.my_pos[2] - cz
+            here = math.sqrt(dx * dx + dz * dz)
+            if here <= ring * 1.15:
+                if here > 1:
+                    st.orbit_angle = math.degrees(math.atan2(dz, dx))
+                stride = float(self.step)
+                max_deg = math.degrees(stride / max(ring, 1)) * 0.85
+                st.orbit_angle = (st.orbit_angle + min(self.orbit_speed, max_deg)) % 360.0
+                rad = math.radians(st.orbit_angle)
+                return (cx + ring * math.cos(rad), y, cz + ring * math.sin(rad))
+        return (cx, y, cz)
+
+    def _outside_zone(self, st, point):
+        if st.zone_center is None or st.zone_radius <= 0:
+            return False
+        cx, cz = st.zone_center[0], st.zone_center[-1]
+        dx = point[0] - cx
+        dz = point[2] - cz
+        return math.sqrt(dx * dx + dz * dz) > st.zone_radius * 0.75
+
+    def plan(self, st, now):
+        if st.my_pos is None or st.my_id is None:
+            return None
+        my = st.my_pos
+        if st.phase is None:
+            return my, 0.0, False
+        phases = (PHASE_FIGHT,)
+        if self.move_in_prepare:
+            phases = (PHASE_FIGHT, PHASE_PREPARE, 2, 9)
+        if st.phase not in phases:
+            return my, 0.0, False
+        aim = self.aim_point(st, now)
+        if aim is None:
+            return my, 0.0, False
+        dx = aim[0] - my[0]
+        dz = aim[2] - my[2]
+        dist = math.sqrt(dx * dx + dz * dz)
+        ty = aim[1] if len(aim) > 2 else my[1]
+        new_y = int(my[1] + (ty - my[1]) * 0.35)
+        if dist <= self.stick_dist or dist < 1e-6:
+            return (my[0], new_y, my[2]), dist, False
+        step = float(self.step)
+        if dist > 8000.0:
+            step = self.max_step
+        move = step if dist > step else dist
+        nx = my[0] + dx / dist * move
+        nz = my[2] + dz / dist * move
+        return (int(nx), new_y, int(nz)), dist, True
+
+
+def _build_position_body(player_id, old_pos, new_pos, aim_yaw, server_time, moving):
+    if moving and old_pos is not None:
+        dx = new_pos[0] - old_pos[0]
+        dz = new_pos[2] - old_pos[2]
+        dist = math.sqrt(dx * dx + dz * dz)
+        if dist >= 1:
+            ux, uz = dx / dist, dz / dist
+            vel = (int(ux * 500), 0, int(uz * 500))
+            rot = (int(ux * 100), 0, int(uz * 100))
+            tdir = (int(ux * 100), int(uz * 100))
+            aim = (ux, 0.0, uz)
+            pose = POSE_DASHING
+        else:
+            vel = (0, 0, 0)
+            rot = (0, 0, 0)
+            tdir = (0, 0)
+            aim = (0.0, 0.0, 0.0)
+            pose = POSE_STANDING
+    else:
+        vel = (0, 0, 0)
+        rad = math.radians(aim_yaw)
+        fx, fz = math.sin(rad), math.cos(rad)
+        rot = (int(fx * 100), 0, int(fz * 100))
+        tdir = (int(fx * 100), int(fz * 100))
+        aim = (fx, 0.0, fz)
+        pose = POSE_STANDING
+    return build_player_state_upload(
+        player_id, new_pos, rot, tdir, vel, aim, server_time,
+        physx_state=0, physx_pose=pose, ping=90)
+
+
+# ═══════════════ DISPATCH INCOMING ═══════════════
+def dispatch_incoming(cmd, body, st, tag, verbose=False):
+    if body is None:
         return
+    if cmd == CMD_PLAYER_JOIN:
+        info = parse_player_join(body)
+        if info is None:
+            return
+        uid, full_id, name = info
+        st.add_player(full_id, name)
+        if uid == st.account_id:
+            st.set_identity(full_id)
+    elif cmd == CMD_MY_STATE:
+        pos = decode_my_state(body)
+        if pos is not None:
+            st.seed_my_pos(pos)
+    elif cmd == CMD_OTHER_STATES:
+        players = decode_players_v2(body)
+        mates = st.teammates()
+        for short, info in players.items():
+            if short not in mates:
+                continue
+            if info.get("physx_pose") == 8:
+                st.downed[short] = info["pos"]
+            elif short in st.downed:
+                st.downed.pop(short, None)
+        if st.target_short is not None:
+            info = players.get(st.target_short)
+            if info is not None:
+                st.update_target(info, time.time())
+    elif cmd == CMD_SERVER_TIME:
+        parsed = decode_server_time(body)
+        if parsed is not None:
+            st.sync_clock(parsed[0], time.time())
+    elif cmd == CMD_GRI_SYNC:
+        parsed = get_match_phase(body)
+        if parsed is not None:
+            phase, round_no, _s, _e = parsed
+            st.phase = phase
+            if round_no is not None:
+                st.round_no = round_no
+    elif cmd == CMD_SAFE_ZONE:
+        zone = decode_safezone(body)
+        if zone is None:
+            return
+        center = zone.get("inner_center") or zone.get("outer_center")
+        radius = zone.get("inner_radius") or zone.get("outer_radius") or 0
+        if center and radius > 0:
+            st.zone_center = (center[0], 0, center[1])
+            st.zone_radius = radius * ZONE_RADIUS_SCALE
+    elif cmd == CMD_QUICK_CHAT:
+        parsed = decode_quick_chat(body)
+        if parsed is None:
+            return
+        chat_id, short, _raw = parsed
+        if chat_id in (QUICK_CHAT_FOLLOW, QUICK_CHAT_HELP):
+            st.set_target(short)
+    elif cmd == CMD_DEAD:
+        try:
+            pid, _ = _rd_varint(body, 0)
+        except (IndexError, ValueError):
+            return
+        if st.my_id is not None and pid == st.my_id:
+            st.alive = False
 
-    pos = list(state.server_pos)
-    anchor = tuple(pos)
-    seen_seq = state.server_update_seq
-    heading = random.uniform(-math.pi, math.pi)
-    stick = (math.sin(heading) * 100, 0.0, math.cos(heading) * 100)
-    target = None
-    speed = 0
-    pause_until = time.time() + random.uniform(*AUTO_MOVE_PAUSE_RANGE)
-    recent_sent = collections.deque(maxlen=40)
-    last_send = time.time()
-    print_success(f"[MOVE]{label} started (slot {state.slot})")
 
+# ═══════════════ MOVEMENT LOOP ═══════════════
+async def movement_loop(sock, remote_addr, udp_key_b, match_code, state, stop_event, tag):
+    planner = MovementPlanner()
+    nr = (await layouts_from_mask(match_code))[1]
+    loop = asyncio.get_event_loop()
+    next_tick = time.time()
     while not stop_event.is_set():
         now = time.time()
-        dt_ms = (now - last_send) * 1000.0
-        last_send = now
-        if state.server_update_seq != seen_seq and state.server_pos:
-            seen_seq = state.server_update_seq
-            sx, sy, sz = state.server_pos
-            if recent_sent and all(math.hypot(sx - p[0], sz - p[2]) > AUTO_MOVE_RESYNC_DISTANCE for p in recent_sent):
-                pos = [sx, sy, sz]
-                anchor = (sx, sy, sz)
-                target = None
-                recent_sent.clear()
-                pause_until = now + random.uniform(*AUTO_MOVE_PAUSE_RANGE)
-        if target is None and now >= pause_until:
-            for _ in range(10):
-                ang = random.uniform(-math.pi, math.pi)
-                dist = random.uniform(0, AUTO_MOVE_RADIUS)
-                cand = (anchor[0] + math.sin(ang) * dist, anchor[2] + math.cos(ang) * dist)
-                if math.hypot(cand[0] - pos[0], cand[1] - pos[2]) >= AUTO_MOVE_MIN_LEG:
-                    break
-            target = cand
-            speed = AUTO_MOVE_RUN_SPEED if random.random() < AUTO_MOVE_RUN_CHANCE else AUTO_MOVE_WALK_SPEED
-        move_input = (0, 0)
-        vel = (0, 0, 0)
-        pose = 0
-        if target is not None:
-            dx, dz = target[0] - pos[0], target[1] - pos[2]
-            remaining = math.hypot(dx, dz)
-            step = speed * dt_ms / 100.0
-            if remaining <= step:
-                pos[0], pos[2] = target
-                target = None
-                pause_until = now + random.uniform(*AUTO_MOVE_PAUSE_RANGE)
-            else:
-                want = math.atan2(dx, dz)
-                diff = (want - heading + math.pi) % (2 * math.pi) - math.pi
-                max_turn = math.radians(AUTO_MOVE_TURN_PER_TICK)
-                heading += max(-max_turn, min(max_turn, diff))
-                ux, uz = math.sin(heading), math.cos(heading)
-                stick = (ux * 100, 0.0, uz * 100)
-                move_input = (stick[0], stick[2])
-                vel = (ux * speed, 0, uz * speed)
-                pose = 2 if speed >= AUTO_MOVE_RUN_SPEED else 0
-                pos[0] += ux * step
-                pos[2] += uz * step
-        facing = (math.sin(heading), 0.0, math.cos(heading))
-        rtt = state.rtt_ms if state.rtt_ms is not None else AUTO_MOVE_DEFAULT_RTT
-        ack = None
-        if AUTO_MOVE_PIGGYBACK_ACK and state.pending_ack is not None:
-            ack, state.pending_ack = state.pending_ack, None
-        try:
-            pkt = await build_player_state_sync_2001(
-                key_bytes, mask, random.choice(AUTO_MOVE_MSG_KEYS), state.slot,
-                pos, stick, move_input, vel, 0, pose, facing,
-                max(1, min(1000, rtt)), int((now - state.session_start) * 1000), ack_order=ack)
-            await loop.sock_sendto(sock, pkt, (ip, port))
-            recent_sent.append((round(pos[0]), round(pos[1]), round(pos[2])))
-        except Exception as e:
-            _log(f"[MOVE]{label} send err: {e}")
-        if await wait(AUTO_MOVE_TICK_INTERVAL):
-            return
-
-# ═══════════════ ANTI AFK ═══════════════
-async def send_anti_afk_fire(sock, addr, udp_key_bytes, match_code, account_id):
-    try:
-        _, nr = await layouts_from_mask(match_code)
-        try: pid = int(account_id)
-        except Exception: pid = 0
-        ts = int(time.time() * 1000) & 0xFFFFFFFF
-        wid = random.choice([101, 102, 103, 201, 202])
-        fire = struct.pack("<IIHB", pid & 0xFFFFFFFF, ts, wid, 1)
-        fp = await build_packet(0x68, nr, 0, 104, None, 0, fire, udp_key_bytes, encrypted=False)
-        loop = asyncio.get_event_loop()
-        await loop.sock_sendto(sock, fp, addr)
-        await asyncio.sleep(bypass_jitter(random.uniform(0.15, 0.30), 0.05))
-        stop = struct.pack("<IIHB", pid & 0xFFFFFFFF, ts + 200, wid, 0)
-        sp = await build_packet(0x68, nr, 0, 105, None, 0, stop, udp_key_bytes, encrypted=False)
-        await loop.sock_sendto(sock, sp, addr)
-        return True
-    except Exception: return False
-
-async def anti_afk_worker(sock, ip, port, udp_key_bytes, match_code, account_id,
-                          stop_event, match_index):
-    addr = (ip, port)
-    try:
-        await asyncio.sleep(bypass_jitter(2.5, 0.5))
-        while not stop_event.is_set():
+        if now < next_tick:
             try:
-                await send_anti_afk_fire(sock, addr, udp_key_bytes, match_code, account_id)
-                w = random.uniform(ANTI_AFK_MIN_INTERVAL, ANTI_AFK_MAX_INTERVAL)
-                w = bypass_packet_jitter(w, 0.25)
-                try: await asyncio.wait_for(stop_event.wait(), timeout=w); break
-                except asyncio.TimeoutError: pass
-            except asyncio.CancelledError: break
-            except Exception: await asyncio.sleep(1.0)
-    except asyncio.CancelledError: pass
+                await asyncio.wait_for(stop_event.wait(), timeout=next_tick - now)
+                break
+            except asyncio.TimeoutError:
+                pass
+            continue
+        next_tick += MOVE_INTERVAL
+        if next_tick < now:
+            next_tick = now + MOVE_INTERVAL
+        if not state.alive or state.my_id is None:
+            continue
+        planned = planner.plan(state, now)
+        if planned is None:
+            continue
+        new_pos, dist, moving = planned
+        old_pos = state.my_pos
+        state.my_pos = new_pos
+        yaw = planner.next_yaw()
+        srv_time = state.server_time(now)
+        body = _build_position_body(state.my_id, old_pos, new_pos, yaw, srv_time, moving)
+        pkt = await build_packet(0x6B, nr, 0, CMD_MY_STATE, None, 1,
+                                 body, udp_key_b, encrypted=True)
+        try:
+            await loop.sock_sendto(sock, pkt, remote_addr)
+        except Exception:
+            pass
 
-# ═══════════════ TEAM INVITE HANDLER ═══════════════
-async def _handle_team_invite(hex_data, pl, uid_str, current_account_data,
-                              current_key, current_iv, writer, grp: TeamGroup):
-    try:
-        candidates = []
-        for off in [10, 8, 6, 12, 14, 4, 16, 0, 20, 2]:
-            if off >= len(hex_data) or len(hex_data) - off < 4: continue
-            try: inner = bytes.fromhex(hex_data[off:])
-            except Exception: continue
-            dec = decode_protobuf_dict(inner)
-            if dec and isinstance(dec, dict) and len(dec) > 0:
-                candidates.append((off, "parser", dec)); continue
-            alt = _decode_proto_manual(inner)
-            if alt and len(alt) > 0:
-                candidates.append((off, "manual", {str(k): {"data": v} for k, v in alt.items()}))
-        if not candidates: return False
-        candidates.sort(key=lambda x: len(x[2]) if isinstance(x[2], dict) else 0, reverse=True)
-        best_off, decoder, dec = candidates[0]
 
-        def _unwrap(d, keys):
-            if not isinstance(d, dict): return None
-            for k in keys:
-                v = d.get(k) if k in d else d.get(str(k))
-                if isinstance(v, dict) and "data" in v: return v["data"]
-                if isinstance(v, dict): return v
-            return None
-
-        target_dict = None
-        for kp in [["5"], ["4"], ["6"], ["2"], ["1"]]:
-            u = _unwrap(dec, kp)
-            if isinstance(u, dict) and len(u) >= 3:
-                target_dict = u; break
-        if target_dict is None: target_dict = dec
-
-        def _g(d, k):
-            if not isinstance(d, dict): return None
-            v = d.get(k) if k in d else d.get(str(k))
-            if isinstance(v, dict) and "data" in v: return v["data"]
-            if isinstance(v, dict):
-                for kk in ["1","2","3","4","5","6","7","8"]:
-                    vv = v.get(kk) if kk in v else v.get(int(kk))
-                    if isinstance(vv, dict) and "data" in vv: return vv["data"]
-            return v
-
-        group_id = None
-        for k in list(target_dict.keys()):
-            c = _g(target_dict, k)
-            if isinstance(c, str) and 20 <= len(c) <= 40:
-                group_id = c; break
-        if not group_id:
-            for k in list(dec.keys()):
-                c = _g(dec, k)
-                if isinstance(c, str) and 20 <= len(c) <= 40:
-                    group_id = c; break
-
-        own_acc = str(current_account_data.get('account_id')) if current_account_data else None
-        inviter = None
-        all_f = list(target_dict.keys()) + list(dec.keys())
-        for k in all_f:
-            c = _g(target_dict, k) or _g(dec, k)
-            if c and str(c).isdigit() and 6 <= len(str(c)) <= 15:
-                if str(c) != uid_str and str(c) != own_acc:
-                    inviter = str(c); break
-
-        tc = None
-        for k in all_f:
-            c = _g(target_dict, k) or _g(dec, k)
-            if c and str(c).isdigit() and len(str(c)) == 7:
-                tc = str(c); break
-        if tc:
-            async with grp.lock:
-                if grp.team_code != tc:
-                    grp.team_code = tc
-                    banner_team_code(tc, uid_str)
-
-        is_member = (grp.leader_uid != uid_str)
-        if inviter and group_id and is_member:
-            async with grp.members_lock:
-                already = uid_str in grp.members
-            if already: return True
-            accepted = False
-            for attempt in range(3):
-                try:
-                    acc = accept_team_invite(int(inviter), group_id, current_key, current_iv)
-                    if writer and not writer.is_closing():
-                        writer.write(acc); await writer.drain()
-                        accepted = True; break
-                except Exception: pass
-                await asyncio.sleep(0.8)
-            if accepted:
-                await team_member_join(grp, uid_str)
-            return True
-        return False
-    except Exception: return False
-
-# ═══════════════ PLAY GAME ═══════════════
-async def play_game(server_ip_port, thunder, sharma, udp_key, match_code,
-                    account_id, player_region, client_version, key, iv,
-                    match_index, on_match_complete=None):
-    t0 = time.time()
-    ping_task = anti_task = move_task = None
-    sock = None
-    ping_stop = asyncio.Event(); anti_stop = asyncio.Event(); move_stop = asyncio.Event()
-    uid_str = str(account_id); completed = False; died = False
-    move_state = MoveState()
-    # ═══ CHANGE 3: track last cmd=2001 (own-state sync) ═══
-    last_2001_time = time.time()
+# ═══════════════ MAIN UDP PLAY LOOP ═══════════════
+async def play_game(server_ip_port, prepare_packets, post_packet, udp_key, match_code,
+                    account_id, player_region, client_version, tag="[?]",
+                    account_jwt="", sleep_ms=0, squad_done=None):
+    match_start = time.time()
+    ping_task = afk_task = hello_task = sock = None
+    ping_stop = asyncio.Event()
+    afk_stop = asyncio.Event()
+    state = MovementState(account_id)
+    reason = "ended"
 
     try:
-        ip, port = server_ip_port.split(":"); port = int(port)
-        rip = await resolve_host_cloudflare(ip)
+        ip, port = server_ip_port.split(":")
+        port = int(port)
+        resolved_ip = socket.gethostbyname(ip)
         loop = asyncio.get_event_loop()
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try: sock.bind(('0.0.0.0', 0))
-        except Exception: pass
-        optimize_udp_socket(sock); sock.setblocking(False)
-        udp_key_bytes = bytes.fromhex(udp_key)
-        await asyncio.sleep(bypass_hello_delay())
-        hello = await build_hello_packet(f"{account_id}_2585", udp_key_bytes, match_code)
-        await loop.sock_sendto(sock, bytes.fromhex(hello), (rip, port))
+        optimize_udp_socket(sock)
+        sock.setblocking(False)
+        udp_key_b = bytes.fromhex(udp_key)
+        remote = (resolved_ip, port)
+        gap = sleep_ms / 1000.0 if sleep_ms else 0.02
+
+        if account_jwt:
+            auth_pkt = build_auth_datagram(account_jwt, account_id, player_region)
+            await loop.sock_sendto(sock, auth_pkt, remote)
+
+        hello_hex = await build_hello_packet(f"{account_id}_2585", udp_key_b, match_code)
+        hello_bytes = bytes.fromhex(hello_hex)
+        await loop.sock_sendto(sock, hello_bytes, remote)
+        _log(f"{tag} UDP connected remote={resolved_ip}:{port}")
+
         ack_state = "waiting_for_hello_reply"
-        thunder_sent = False; join_match_rcv = False; local_closed = False
-        send_lock = asyncio.Lock(); anti_started = False
-        ping_task = asyncio.create_task(keepalive_ping(sock, rip, port, udp_key_bytes, match_code, ping_stop))
-        last_activity = time.time()
-        print_colored(f"[MATCH #{match_index}] UDP -> {server_ip_port}", Colors.MAGENTA)
+        startup_sent = False
+        local_closed = False
+        send_lock = asyncio.Lock()
+        nr = (await layouts_from_mask(match_code))[1]
 
-        async def start_workers():
-            nonlocal anti_task, move_task, anti_started
-            if anti_started: return
-            anti_started = True
-            anti_task = asyncio.create_task(anti_afk_worker(sock, rip, port, udp_key_bytes, match_code,
-                                                            account_id, anti_stop, match_index))
-
-            async def delayed_movement():
-                print_info(f"[MOVE] #{match_index} waiting {AUTO_MOVE_START_DELAY:.0f}s before movement...")
+        async def ka_loop():
+            pklist = [0x66, 0x6D, 0x69, 0x6C, 0x6B, 0x6E, 0x6F, 0x70]
+            i = 0
+            while not ping_stop.is_set():
+                if ack_state != "waiting_for_hello_reply":
+                    break
                 try:
-                    await asyncio.wait_for(move_stop.wait(), timeout=AUTO_MOVE_START_DELAY)
-                    return
+                    await asyncio.wait_for(ping_stop.wait(), timeout=0.1)
                 except asyncio.TimeoutError:
                     pass
-                if move_stop.is_set():
-                    return
-                await auto_move_loop(sock, rip, port, udp_key_bytes, match_code,
-                                     move_state, move_stop, label=f"#{match_index}")
-
-            if AUTO_MOVE_ENABLED:
-                move_task = asyncio.create_task(delayed_movement())
-
-        async def send_startup():
-            nonlocal ack_state, thunder_sent
-            if thunder_sent: return
-            async with send_lock:
-                if thunder_sent: return
+            while not ping_stop.is_set():
+                pk = pklist[i % len(pklist)]
+                cnt = int(time.time() * 1000) & 0xFFFFFFFF
+                pkt = await build_packet(pk, nr, 0, 3, None, 0,
+                                         cnt.to_bytes(4, "little") + b"\x00\x00\x00",
+                                         udp_key_b, encrypted=False)
                 try:
-                    await loop.sock_sendto(sock, bytes.fromhex(thunder), (rip, port))
-                    thunder_sent = True
-                    await asyncio.sleep(bypass_jitter(0.1, 0.05))
-                    _, nr = await layouts_from_mask(match_code)
-                    ack = await build_packet(0x68, nr, 0, 2, None, 1, b"\x01\x00", udp_key_bytes)
-                    await loop.sock_sendto(sock, ack, (rip, port))
-                    await asyncio.sleep(bypass_jitter(0.2, 0.05))
-                    await loop.sock_sendto(sock, bytes.fromhex(sharma), (rip, port))
-                    ack_state = "thunder_sharma_sent"
-                    print_success(f"[MATCH #{match_index}] Startup delivered")
-                    await start_workers()
-                except Exception as e: print_error(f"[MATCH #{match_index}] startup: {e}")
+                    await loop.sock_sendto(sock, pkt, remote)
+                except Exception:
+                    pass
+                i += 1
+                try:
+                    await asyncio.wait_for(ping_stop.wait(), timeout=3.0)
+                except asyncio.TimeoutError:
+                    pass
+
+        async def hello_retry_loop():
+            for _ in range(8):
+                if ping_stop.is_set() or ack_state != "waiting_for_hello_reply":
+                    return
+                try:
+                    await asyncio.wait_for(ping_stop.wait(), timeout=0.8)
+                except asyncio.TimeoutError:
+                    pass
+                if ping_stop.is_set() or ack_state != "waiting_for_hello_reply":
+                    return
+                try:
+                    await loop.sock_sendto(sock, hello_bytes, remote)
+                except Exception:
+                    pass
+
+        ping_task = asyncio.create_task(ka_loop())
+        hello_task = asyncio.create_task(hello_retry_loop())
+        afk_task = asyncio.create_task(
+            movement_loop(sock, remote, udp_key_b, match_code, state, afk_stop, tag))
+        last_activity = time.time()
+
+        async def send_join_match():
+            nonlocal ack_state, startup_sent
+            if startup_sent:
+                return
+            async with send_lock:
+                if startup_sent:
+                    return
+                for p in prepare_packets:
+                    await loop.sock_sendto(sock, bytes.fromhex(p), remote)
+                    await asyncio.sleep(gap)
+                await asyncio.sleep(gap)
+                await loop.sock_sendto(sock, bytes.fromhex(post_packet), remote)
+                startup_sent = True
+                ack_state = "startup_sent"
+                _log(f"{tag} -> PREPARE+POST sent")
 
         while not local_closed:
-            if time.time() - t0 > MAX_MATCH_DURATION:
-                completed = True; break
-            if ack_state != "thunder_sharma_sent" and (time.time() - t0) > HANDSHAKE_TIMEOUT:
-                print_warning(f"[MATCH #{match_index}] Handshake timeout")
+            if time.time() - match_start > MATCH_MAX_LIFETIME:
+                reason = "ended"
                 break
             try:
-                resp, saddr = await asyncio.wait_for(loop.sock_recvfrom(sock, 65535), timeout=1.5)
+                resp, sa = await asyncio.wait_for(
+                    loop.sock_recvfrom(sock, 65535), timeout=1.5)
                 if resp:
-                    frame = await decode_packet(resp, udp_key_bytes, match_code)
+                    last_activity = time.time()
+                    frame = await decode_packet(resp, udp_key_b, match_code)
                     if frame:
-                        try: move_state.on_server_frame(frame)
-                        except Exception: pass
+                        cmd = frame.get('cmd')
+                        oid = frame.get('orderId')
+                        msg_key = frame.get('msgKey', 0)
+                        content = frame.get('content')
 
-                        pt = await classify(frame)
+                        if msg_key < 100 and oid is not None:
+                            da = await build_packet(
+                                0x68, nr, 0, 2, None, 1,
+                                ((oid + 1) & 0xFFFF).to_bytes(2, "little"),
+                                udp_key_b)
+                            await loop.sock_sendto(sock, da, sa)
 
-                        # ═══ CHANGE 3a: only real packets count as activity ═══
-                        if pt not in ("PING", "ACK"):
-                            last_activity = time.time()
-
-                        # ═══ CHANGE 3b: track cmd=2001 ═══
-                        if frame['cmd'] == 2001:
-                            last_2001_time = time.time()
-
-                        if frame['cmd'] in [103, 107]:
-                            if not died:
-                                print_warning(f"[MATCH #{match_index}] Died/Ended cmd={frame['cmd']}")
-                                died = True; completed = True
-                                move_stop.set(); anti_stop.set()
-                            local_closed = True; continue
-
-                        if frame['cmd'] == 101:
-                            try:
-                                _, nr = await layouts_from_mask(match_code)
-                                a = await build_packet(0x68, nr, 0, 2, None, 1, b"\x01\x00", udp_key_bytes)
-                                await loop.sock_sendto(sock, a, saddr)
-                            except Exception: pass
-                            continue
-                        if pt in ["ACK", "PING", "HELLO", "JOIN_MATCH"]:
-                            if pt == "HELLO" and ack_state == "waiting_for_hello_reply":
-                                _, r = await reply_for(frame, udp_key_bytes, match_code, ack_style="short")
-                                if r: await loop.sock_sendto(sock, r, saddr)
-                                ack_state = "ack_sent_waiting"
-                            elif pt == "ACK":
-                                if ack_state == "waiting_for_hello_reply":
-                                    _, r = await reply_for(frame, udp_key_bytes, match_code)
-                                    if r: await loop.sock_sendto(sock, r, saddr)
-                                    ack_state = "ready_to_send_thunder"
-                                elif ack_state == "ack_sent_waiting":
-                                    ack_state = "ready_to_send_thunder"
-                                else:
-                                    _, r = await reply_for(frame, udp_key_bytes, match_code)
-                                    if r: await loop.sock_sendto(sock, r, saddr)
-                            elif pt == "PING":
-                                _, r = await reply_for(frame, udp_key_bytes, match_code)
-                                if r: await loop.sock_sendto(sock, r, saddr)
-                            elif pt == "JOIN_MATCH" and not join_match_rcv:
-                                _, r = await reply_for(frame, udp_key_bytes, match_code)
-                                if r: await loop.sock_sendto(sock, r, saddr); join_match_rcv = True
+                        if cmd == 1:
+                            if ack_state == "waiting_for_hello_reply":
+                                ack_state = "ready_to_send_startup"
+                        elif cmd == 3:
+                            c = content or b""
+                            cnt = c[:4] if len(c) >= 4 else c
+                            rp = await build_packet(0x6D, nr, 0, 3, None, 0,
+                                                    cnt + b"\x00\x00\x00",
+                                                    udp_key_b, encrypted=False)
+                            await loop.sock_sendto(sock, rp, sa)
+                        elif cmd == 130:
+                            _log(f"{tag}   [OK] JOIN_MATCH_FINISHED - in game")
+                        elif cmd == 103:
+                            _log(f"{tag}   [END] MATCH_END received")
+                            local_closed = True
+                            reason = "ended"
+                        dispatch_incoming(cmd, content, state, tag)
             except asyncio.TimeoutError:
-                if ack_state == "ready_to_send_thunder" and not thunder_sent:
-                    await send_startup()
-                elif ack_state == "waiting_for_hello_reply":
-                    if (time.time() - last_activity) > 7.0:
-                        try:
-                            hp = await build_hello_packet(f"{account_id}_2585", udp_key_bytes, match_code)
-                            await loop.sock_sendto(sock, bytes.fromhex(hp), (rip, port))
-                        except Exception: pass
-                        last_activity = time.time()
-                elif ack_state == "thunder_sharma_sent":
-                    # ═══ CHANGE 3c: match end detection ═══
-                    # 1) 30s idle (no real packets — keepalive ignored)
-                    if (time.time() - last_activity) > MATCH_IDLE_TIMEOUT:
-                        print_success(f"[MATCH #{match_index}] Idle timeout ({MATCH_IDLE_TIMEOUT:.0f}s) → match ended")
-                        completed = True; break
-                    # 2) 45s no cmd=2001 → player out of map / match ended
-                    if (time.time() - last_2001_time) > 45.0:
-                        print_success(f"[MATCH #{match_index}] No own-state 45s → match ended")
-                        completed = True; break
-                continue
-            except BlockingIOError: await asyncio.sleep(0.05)
-            except OSError: await asyncio.sleep(0.5); continue
-            except Exception: await asyncio.sleep(0.5); continue
-            if ack_state == "ready_to_send_thunder" and not thunder_sent:
-                try: await send_startup()
-                except Exception: pass
-        return f"match #{match_index} finished"
+                pass
+            except Exception as e:
+                _log(f"{tag} UDP err: {e}")
+                await asyncio.sleep(0.5)
+            if ack_state == "ready_to_send_startup" and not startup_sent:
+                await send_join_match()
+            elif ack_state == "startup_sent" and (time.time() - last_activity) > 30:
+                reason = "ended"
+                break
     except Exception as e:
-        print_error(f"[MATCH #{match_index}] {e}"); return f"match #{match_index} error"
+        _log(f"{tag} UDP err: {e}")
+        reason = "error"
     finally:
-        if completed and on_match_complete:
-            try: asyncio.create_task(on_match_complete())
-            except Exception: pass
-        anti_stop.set(); move_stop.set()
-        for t in (anti_task, move_task):
-            if t:
-                try: await asyncio.wait_for(t, timeout=2.0)
-                except Exception:
-                    t.cancel()
-                    try: await t
-                    except Exception: pass
         ping_stop.set()
-        if ping_task:
-            ping_task.cancel()
-            try: await ping_task
-            except asyncio.CancelledError: pass
+        afk_stop.set()
+        for t in (ping_task, hello_task, afk_task):
+            if t:
+                t.cancel()
         if sock:
-            try: sock.close()
-            except Exception: pass
-        rem = await _dec_match(uid_str)
-        print_info(f"[MATCH #{match_index}] Closed. UID:{rem}")
+            try:
+                sock.close()
+            except Exception:
+                pass
+        _log(f"{tag} UDP closed reason={reason}")
+        # --- YE HAI LOOP FIX ---
+        if squad_done is not None:
+            squad_done["count"] = squad_done.get("count", 0) + 1
+            if squad_done["count"] >= squad_done["total"]:
+                squad_done["event"].set()
+    return reason
 
-# ═══════════════ FUNCTIONAL BATTLE ROYALE ═══════════════
-async def functional_battle_royale(addrs, starter_packet, account_region, client_version,
-                                    key, iv, account_id="", account_data=None,
-                                    account_level=2, max_reconnects=10,
-                                    grp: Optional[TeamGroup] = None):
-    if grp is None:
-        grp = TeamGroup(0, TEAM_SIZE)
-    if not addrs or ":" not in str(addrs):
-        print_error(f"[FUNC] Missing TCP address for {account_id}")
-        return
 
-    reconnects = 0
-    ip, port = addrs.split(":")
-    no_response_count = 0
-    uid_str = str(account_id)
-    current_level = int(account_level or 2)
-    current_token = starter_packet
-    current_key = key; current_iv = iv
-    current_account_data = account_data
-    reconnect_count_total = 0
-    region_index = 0
-    current_search_region = account_region or REGION_ROTATION_LIST[0]
-    _writer_ref = {"w": None}
-    current_match_task: Optional[asyncio.Task] = None
+# ═══════════════ SQUAD TEAM PROTOBUF HELPERS ═══════════════
+_C_S1 = "0200044B122D3B02010000000000000000000000000000E3172CED00"
+_C_14_1 = b"\x32" + bytes([len(_C_S1)]) + _C_S1.encode() + b"\x30\x30" * 3
+_C_14_3 = bytes.fromhex(
+    "7e585c521207074f5d030c5c545104570455070f0a555a085201095701025b560601545606010f07100802487d5c4043481e07"
+    "1f081a1709034c0757787500566b45627e7a6548407565577a700e7708627a047e7e041005447b5d655070547e437c607f7656"
+    "5675704e5877525b5a5b515662410a105f5c5a4c1e637f1c7147430b4f6c557778605b67416b50635850500056575e005a7606"
+    "057005067e0c15060045455e56447a665a6672694b5046524b057b79427c715560577b575f0a120e4b470e631b536262186b0f"
+    "73406359475343795c481d7918564b47790c13054d1d714b5d75451740515f7e586d414e40595a03000e654e0741507a091b08"
+    "4c6668777b1c4c676517505d6e7a4c4e7d7c791f5269057f42440207041005004d7e5c5977037d4a631f560255026b7a647e6b"
+    "0007015503746353500e1a0048701a0153626506774f18065e0558610457421856007313771b60010b140745554d7f50477d68"
+    "770662600646696876026242541c4a49037f74750a1204074f487402135059457f517b415266604a434506064e79004c5a7b4f"
+    "700d14044a58454a5a7c5e5f5b764354425e1267735041537d6041180a6d694305"
+)
+_C_14_7 = bytes.fromhex("1d02474b420204030506171d677c716374687d5f557051565753")
+_C_14_11 = b"\x03" + (
+    "bbSQ69i8H3F5AdV2KyoVlWj2cgPtsEL3Pi8QcWkc/NJiGxtxXsmeZDDwFPKPbvd56sULGeaD3qha9S6hKIkIb3oXVAAFErlI76uU2p2AqNdJyaucxz1ba5ecHPCBohQR6E5Y1UzpsgpxutURpI8pbqY0tCpeL1bOT+F5UaysgFmTeoIalHxxEYPQx7OVJHElCV5el0vpIs98JSA3nB8FWin6ckz5Fd0sG4n2g0B7OUOvcreqilCT737xI24wPxLdidSr1AJ2MK0/m3ugV1iqzPXhttKyvfmMNVY8DoXBBUcYt3vpK7mgbnietrOqJIbJC3O4ygX6IWl/hkp+ngsjfeOZSornpzFnxM/kkqZgZjVOweXe61FRU6JsGSeTeY63kqA/mbCPfdwodSYJE2hXfVJofxRG1644gFPYRkCPUjJazd2l9WAh9kd86kYbjphbxwz55ciWvZ3sDJR11W96ezyxJPhJPD8FQoQVmno6BP4e7QI1xe+h35bkS1epZq6K6xUP5YtHFvqbhARMNQKUYYzXQWRFMNL1JgAeMJNO0+eCPL57+RXzRKtlgM/rVsIWhNw8Oo9SdP+7wsGrMK+HIOJaF1apAXNRQ9mCqxI="
+).encode()
 
-    async def trigger_post_match_refresh():
-        await asyncio.sleep(EXP_REFRESH_AFTER_MATCH_DELAY)
-        print_info(f"[EXP] post-match refresh for {uid_str}")
 
-    async def _team_coordinator():
+def _vi(n):
+    out = bytearray()
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        if n:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            break
+    return bytes(out)
+
+
+def _one(field, v):
+    if isinstance(v, dict):
+        body = _pb(v)
+        return _vi((field << 3) | 2) + _vi(len(body)) + body
+    if isinstance(v, int):
+        return _vi(field << 3) + _vi(v)
+    if isinstance(v, (str, bytes)):
+        b = v.encode() if isinstance(v, str) else v
+        return _vi((field << 3) | 2) + _vi(len(b)) + b
+    raise TypeError(type(v))
+
+
+def _pb(fields):
+    out = bytearray()
+    for f, v in fields.items():
+        if isinstance(v, list):
+            for it in v:
+                out += _one(f, it)
+        else:
+            out += _one(f, v)
+    return bytes(out)
+
+
+def _br_frame(ptype, region, proto, key, iv):
+    enc = AES.new(key, AES.MODE_CBC, iv).encrypt(pad(proto, 16))
+    return bytes([ptype, region_byte(region)]) + len(enc).to_bytes(4, "big") + enc
+
+
+def _br_idc(reg, pings=(75, 123)):
+    return [{1: "IDC1", 2: pings[0], 3: reg},
+            {1: "IDC2", 2: pings[1], 3: reg}]
+
+
+def br_create_squad_pkt(region, client_version, key, iv):
+    reg = str(region or "IND").upper()
+    f = {
+        1: 1,
+        2: {
+            2: b"\x01", 3: 1, 4: SQUAD_PLAYERS - 1, 5: "en",
+            8: _br_idc(reg), 9: 2,
+            10: bytes.fromhex("01090a0b12191a202729"),
+            11: 1, 13: 1,
+            14: {1: _C_14_1, 2: 40, 3: _C_14_3, 4: "w\\Z]", 6: 12, 7: _C_14_7,
+                 8: client_version or "1.132.13", 9: 6, 10: 2, 11: _C_14_11},
+            19: 329, 21: bytes.fromhex("374f521955"),
+            24: [{1: 3, 2: 360}, {1: 4, 2: 391}, {1: 5, 2: 156},
+                 {1: 29, 2: 204}, {1: 22, 2: 118}, {1: 14, 2: 139}, {1: 21}],
+            30: "https://dl-ind-production.freefiremobile.com/2832022628717E276054_7104117490_107_1767713981_0",
+        },
+    }
+    return _br_frame(0x05, reg, _pb(f), key, iv)
+
+
+def br_join_team_pkt(code, region, client_version, key, iv):
+    reg = str(region or "IND").upper()
+    field9 = {1: _C_14_1, 2: 40, 3: _C_14_3, 4: "w\\Z]", 6: 12, 7: _C_14_7,
+              8: client_version or "1.132.13", 9: 6, 10: 2, 11: _C_14_11}
+    f = {1: 4, 2: {
+        4: bytes.fromhex("01090a0b121619201d2729"),
+        5: str(code), 6: 6, 8: 1,
+        9: field9,
+        11: _br_idc(reg, (99, 136)),
+        13: "en", 16: bytes.fromhex("374f521955"),
+        20: [{1: 3, 2: 360}, {1: 4, 2: 391}, {1: 5, 2: 156},
+             {1: 29, 2: 204}, {1: 22, 2: 118}, {1: 14, 2: 139}, {1: 21}],
+        27: {1: 2, 2: 4}}}
+    return _br_frame(0x05, reg, _pb(f), key, iv)
+
+
+def br_start_squad_pkt(uid, region, key, iv):
+    reg = str(region or "IND").upper()
+    return _br_frame(0x05, reg,
+                     _pb({1: 9, 2: {1: int(uid), 7: _br_idc(reg)}}),
+                     key, iv)
+
+
+async def send_op31(group_id, region, key, iv):
+    fields = {1: 31, 2: {1: int(group_id)}}
+    pkt = f"05{region_byte(region):02x}"
+    proto = _pb(fields)
+    enc = AES.new(key, AES.MODE_CBC, iv).encrypt(pad(proto, 16)).hex()
+    header = pkt + "0000" + enc
+    enc_bytes = bytes.fromhex(enc)
+    return bytes.fromhex(pkt) + len(enc_bytes).to_bytes(4, "big") + enc_bytes
+
+
+def _decode_frame_payload(payload):
+    if not HAS_PARSER:
+        return None
+    try:
+        from protobuf_decoder.protobuf_decoder import Parser
+        parsed = Parser().parse(payload.hex())
+        decoded = {}
+        for r in parsed:
+            wt = r.wire_type
+            if wt == "length_delimited":
+                try:
+                    sub = r.data.results
+                    nested = {}
+                    for sr in sub:
+                        if sr.wire_type == "length_delimited":
+                            try:
+                                inner = sr.data.results
+                                nested_inner = {}
+                                for ir in inner:
+                                    if ir.wire_type == "length_delimited":
+                                        nested_inner[str(ir.field)] = {"data": "nested"}
+                                    else:
+                                        nested_inner[str(ir.field)] = {"data": ir.data}
+                                nested[str(sr.field)] = nested_inner
+                            except Exception:
+                                nested[str(sr.field)] = {"data": str(sr.data)}
+                        else:
+                            nested[str(sr.field)] = {"data": sr.data}
+                    decoded[str(r.field)] = nested
+                except Exception:
+                    decoded[str(r.field)] = {"data": str(r.data)}
+            else:
+                decoded[str(r.field)] = {"data": r.data}
+        return decoded
+    except Exception:
+        return None
+
+
+def _extract_team_code(decoded, master_id):
+    if not isinstance(decoded, dict):
+        return None
+    candidates = []
+    r5 = decoded.get("5")
+    if isinstance(r5, dict):
+        for k in ("1", "2", "3", "4", "5", "6", "11"):
+            v = r5.get(k)
+            if isinstance(v, dict):
+                v = v.get("data")
+            if isinstance(v, (str, int)):
+                candidates.append(str(v))
+    for k in ("1", "2", "3"):
+        v = decoded.get(k)
+        if isinstance(v, dict):
+            v = v.get("data")
+        if isinstance(v, (str, int)):
+            candidates.append(str(v))
+    for c in candidates:
+        if not c or c == str(master_id):
+            continue
+        if c.isdigit() and len(c) >= 12 and c != str(master_id):
+            continue
+        return c
+    for c in candidates:
+        if c and c != str(master_id):
+            return c
+    return None
+
+
+def _match_info_from_frame(ptype, cmd, decoded, payload=None):
+    is_matchmaking = (ptype == 0x03 and cmd == 5)
+    is_reconnect = (ptype == 0x11 and cmd == 3)
+    if not (is_matchmaking or is_reconnect):
+        return None
+
+    def _extract(d):
+        if not isinstance(d, dict):
+            return None
+        r5 = d.get("5") or d.get(5) or {}
+        if not isinstance(r5, dict):
+            return None
+        ip_port = r5.get("2") or r5.get(2)
+        udp_key = r5.get("3") or r5.get(3)
+        token = r5.get("4") or r5.get(4)
+        mcode = r5.get("42") or r5.get(42)
+        if isinstance(ip_port, dict):
+            ip_port = ip_port.get("data")
+        if isinstance(udp_key, dict):
+            udp_key = udp_key.get("data")
+        if isinstance(token, dict):
+            token = token.get("data")
+        if isinstance(mcode, dict):
+            mcode = mcode.get("data")
+        if (isinstance(ip_port, str) and ":" in ip_port
+                and isinstance(udp_key, str)
+                and isinstance(token, str) and mcode is not None):
+            r5_clean = dict(r5)
+            r5_clean["2"] = ip_port
+            r5_clean["3"] = udp_key
+            r5_clean["4"] = token
+            r5_clean["42"] = str(mcode)
+            return r5_clean
+        return None
+
+    result = _extract(decoded)
+    if result:
+        return result
+
+    if payload is not None:
         try:
-            deadline = time.time() + TEAM_PEER_WAIT_TIMEOUT
-            min_ok = max(2, grp.size - 1)
-            while time.time() < deadline:
-                async with grp.lock:
-                    n = len(grp.peers)
-                if n >= grp.size: break
-                if n >= min_ok:
-                    await asyncio.sleep(1.5)
-                    async with grp.lock:
-                        n2 = len(grp.peers)
-                    if n2 >= min_ok: break
-                await asyncio.sleep(0.3)
+            alt = parse_proto(payload)
+            alt_norm = {}
+            for k, vals in alt.items():
+                for kind, v in vals:
+                    if kind == "bytes":
+                        try:
+                            nested = parse_proto(bytes.fromhex(v))
+                            alt_norm[str(k)] = {
+                                str(nk): [{"data": nv} for _, nv in nv_list]
+                                for nk, nv_list in nested.items()
+                            }
+                            break
+                        except Exception:
+                            pass
+                    else:
+                        alt_norm.setdefault(str(k), []).append({"data": v})
+            return _extract(alt_norm)
+        except Exception:
+            pass
+    return None
 
-            async with grp.lock:
-                is_leader = (grp.leader_uid == uid_str)
-                peers_snapshot = dict(grp.peers)
 
-            if not is_leader: return
+def _collect_all_ints(obj, out):
+    if isinstance(obj, dict):
+        if "data" in obj and isinstance(obj["data"], int):
+            out.add(obj["data"])
+        for v in obj.values():
+            _collect_all_ints(v, out)
+    elif isinstance(obj, list):
+        for x in obj:
+            _collect_all_ints(x, out)
+    elif isinstance(obj, int):
+        out.add(obj)
 
-            await asyncio.sleep(TEAM_READY_DELAY)
-            print_success(f"[TEAM-{grp.tag()}] 👑 {uid_str} creating squad...")
 
-            async with grp.lock:
-                grp.team_code = None
-                grp.pk_code = None
+# ═══════════════ SLAVE LOOP ═══════════════
+async def slave_loop(acct, holder, match_infos, stop_evt):
+    tag = acct["tag"]
+    region = acct.get("region", "IND")
+    ip, port = acct["game_server"].split(":")
+    key, iv = acct["key"], acct["iv"]
+    jwt = acct["jwt"]
+    ingame_id = int(acct["ingame_id"])
+    ts = acct["ts"]
+    auth_online = await build_auth_packet(ingame_id, jwt, ts, key, iv, region, "OnLine")
+    ka_bytes = await send_keep_alive(region)
+    remote_version = acct["cfg"].get("remote_version", _PLAY_VERSION)
 
-            own_id_num = None
-            if current_account_data: own_id_num = current_account_data.get('account_id')
-            if not own_id_num:
-                try: own_id_num = int(uid_str)
-                except Exception: own_id_num = 0
+    while not stop_evt.is_set():
+        try:
+            reader, writer = await asyncio.open_connection(ip, int(port))
+            writer.write(auth_online)
+            await writer.drain()
+            writer.write(ka_bytes)
+            await writer.drain()
+            _log(f"Tcp Connected => {acct.get('name', tag)}")
+
+            ka_stop = asyncio.Event()
+
+            async def ka_loop():
+                while not ka_stop.is_set():
+                    try:
+                        await asyncio.sleep(15)
+                        writer.write(ka_bytes)
+                        await writer.drain()
+                    except Exception:
+                        return
+
+            ka_task = asyncio.create_task(ka_loop())
 
             try:
-                pkt = create_team(current_key, current_iv, client_version)
-                if _writer_ref["w"] and not _writer_ref["w"].is_closing():
-                    _writer_ref["w"].write(pkt); await _writer_ref["w"].drain()
-                    await team_member_reset(grp, keep_leader=False)
-                    await team_member_join(grp, uid_str)
-                    print_info(f"[TEAM-{grp.tag()}] create_team sent ({len(pkt)}B)")
-            except Exception as e:
-                print_error(f"[TEAM-{grp.tag()}] create_team: {e}")
+                await asyncio.wait_for(holder["team_code_ready"].wait(), 30)
+            except asyncio.TimeoutError:
+                ka_stop.set()
+                ka_task.cancel()
+                writer.close()
+                continue
 
-            await asyncio.sleep(TEAM_CREATE_WAIT)
+            team_code = holder["team_code"]
+            j = br_join_team_pkt(team_code, region, remote_version, key, iv)
+            writer.write(j)
+            await writer.drain()
 
-            for _ in range(20):
-                if grp.team_code:
+            joined = False
+            join_sent_at = time.time()
+            buf = bytearray()
+
+            while not stop_evt.is_set():
+                try:
+                    chunk = await asyncio.wait_for(reader.read(65536), timeout=1.0)
+                except asyncio.TimeoutError:
+                    if not joined and time.time() - join_sent_at > 3:
+                        joined = True
+                        holder["slave_joined"].add(ingame_id)
+                        print(f"  Bot Joined The Team => {acct.get('name', tag)}")
+                    continue
+                except Exception:
                     break
-                await asyncio.sleep(0.5)
-            if grp.team_code:
-                banner_team_code(grp.team_code, uid_str)
-            else:
-                print_warning(f"[TEAM-{grp.tag()}] Team code not yet received after 10s")
+                if not chunk:
+                    break
+                buf.extend(chunk)
+                while len(buf) >= 5:
+                    ptype = buf[0]
+                    plen = int.from_bytes(buf[1:5], "big")
+                    if plen > 100_000 or len(buf) < 5 + plen:
+                        break
+                    payload = bytes(buf[5:5 + plen])
+                    del buf[:5 + plen]
+                    decoded = _decode_frame_payload(payload)
+                    cmd = None
+                    if isinstance(decoded, dict):
+                        v = decoded.get("4")
+                        if isinstance(v, dict):
+                            v = v.get("data")
+                        if isinstance(v, int):
+                            cmd = v
+                    if ptype == 0x05 and plen >= 200 and not joined:
+                        joined = True
+                        holder["slave_joined"].add(ingame_id)
+                        print(f"  Bot Joined The Team => {acct.get('name', tag)}")
+                    minfo = _match_info_from_frame(ptype, cmd, decoded, payload)
+                    if minfo is not None and tag not in match_infos:
+                        match_infos[tag] = minfo
 
-            peer_uids = []
-            for peer_uid, info in peers_snapshot.items():
-                if peer_uid == uid_str: continue
-                pa = None
-                try: pa = info["data"].get("account_id")
-                except Exception: pass
-                if not pa: pa = peer_uid
-                peer_uids.append(int(pa))
+            ka_stop.set()
+            ka_task.cancel()
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            if stop_evt.is_set():
+                break
+        except Exception:
+            await asyncio.sleep(2.0)
 
-            heartbeat_stop = asyncio.Event()
-            async def heartbeat_loop():
-                while not heartbeat_stop.is_set():
-                    try:
-                        if _writer_ref["w"] and not _writer_ref["w"].is_closing():
-                            pkt = team_fresh(int(own_id_num), current_key, current_iv)
-                            _writer_ref["w"].write(pkt); await _writer_ref["w"].drain()
-                    except Exception: pass
-                    try: await asyncio.wait_for(heartbeat_stop.wait(), timeout=TEAM_HEARTBEAT_INTERVAL)
-                    except asyncio.TimeoutError: pass
-            hb_task = asyncio.create_task(heartbeat_loop())
 
-            invite_start = time.time()
-            while time.time() - invite_start < TEAM_INVITE_MAX_TIME:
-                if not grp.active["flag"]: break
-                cnt = await team_member_count(grp)
-                if cnt >= grp.size: break
-                for tuid in peer_uids:
-                    async with grp.members_lock:
-                        joined = str(tuid) in grp.members
-                    if joined: continue
-                    try:
-                        inv = invite_player_in_team(tuid, current_key, current_iv, region=account_region)
-                        if _writer_ref["w"] and not _writer_ref["w"].is_closing():
-                            _writer_ref["w"].write(inv); await _writer_ref["w"].drain()
-                    except Exception: pass
-                    await asyncio.sleep(0.5)
-                try: await asyncio.wait_for(heartbeat_stop.wait(), timeout=TEAM_INVITE_CYCLE_WAIT)
-                except asyncio.TimeoutError: pass
+# ═══════════════ MASTER LOOP ═══════════════
+async def master_loop(acct, slave_ids, holder, match_infos):
+    tag = acct["tag"]
+    region = acct.get("region", "IND")
+    ip, port = acct["game_server"].split(":")
+    key, iv = acct["key"], acct["iv"]
+    jwt = acct["jwt"]
+    ingame_id = int(acct["ingame_id"])
+    ts = acct["ts"]
+    slave_set = {int(x) for x in slave_ids}
+    remote_version = acct["cfg"].get("remote_version", _PLAY_VERSION)
+    
+    auth_online = await build_auth_packet(ingame_id, jwt, ts, key, iv, region, "OnLine")
+    ka_bytes = await send_keep_alive(region)
 
-            final_cnt = await team_member_count(grp)
-            if final_cnt < grp.size:
-                heartbeat_stop.set()
-                try: hb_task.cancel(); await hb_task
-                except Exception: pass
+    reader, writer = await asyncio.open_connection(ip, int(port))
+    writer.write(auth_online)
+    await writer.drain()
+    writer.write(ka_bytes)
+    await writer.drain()
+    _log(f"Tcp Connected => {acct.get('name', tag)}")
+
+    ka_stop = asyncio.Event()
+
+    async def ka_loop():
+        while not ka_stop.is_set():
+            try:
+                await asyncio.sleep(15)
+                writer.write(ka_bytes)
+                await writer.drain()
+            except Exception:
                 return
 
-            await asyncio.sleep(TEAM_FINAL_WAIT)
-            heartbeat_stop.set()
-            try: hb_task.cancel(); await hb_task
-            except Exception: pass
+    ka_task = asyncio.create_task(ka_loop())
+    await asyncio.sleep(1.0)
+    
+    c = br_create_squad_pkt(region, remote_version, key, iv)
+    writer.write(c)
+    await writer.drain()
+    print(f"  Team Created")
 
-            while grp.active["flag"]:
-                try:
-                    async with grp.lock:
-                        if grp.leader_uid != uid_str: break
-                    oid = current_account_data.get('account_id', own_id_num) if current_account_data else own_id_num
-                    try:
-                        rdy = ready_for_game(int(oid), current_key, current_iv)
-                        if _writer_ref["w"] and not _writer_ref["w"].is_closing():
-                            _writer_ref["w"].write(rdy); await _writer_ref["w"].drain()
-                    except Exception: pass
-                    await asyncio.sleep(1.0)
-                    sm = start_match_team(int(oid), current_key, current_iv, region=account_region)
-                    if _writer_ref["w"] and not _writer_ref["w"].is_closing():
-                        _writer_ref["w"].write(sm); await _writer_ref["w"].drain()
-                except Exception: pass
-                try: await asyncio.wait_for(asyncio.sleep(5.0), timeout=5.5)
-                except asyncio.TimeoutError: pass
-        except asyncio.CancelledError: raise
-        except Exception as e:
-            print_error(f"[TEAM-{grp.tag()}] coordinator: {e}")
+    created = False
+    op31_sent = False
+    buf = bytearray()
 
-    async def _member_match_trigger():
+    async def start_watcher():
         try:
-            await asyncio.sleep(TEAM_READY_DELAY + TEAM_MEMBER_START_DELAY)
-            async with grp.lock:
-                if grp.leader_uid == uid_str: return
-            my_id = current_account_data.get('account_id', uid_str) if current_account_data else uid_str
-            while grp.active["flag"]:
-                try:
-                    if _writer_ref["w"] and not _writer_ref["w"].is_closing():
-                        try:
-                            rdy = ready_for_game(int(my_id), current_key, current_iv)
-                            _writer_ref["w"].write(rdy); await _writer_ref["w"].drain()
-                        except Exception: pass
-                        await asyncio.sleep(1.0)
-                        sm = start_match_team(int(my_id), current_key, current_iv, region=account_region)
-                        _writer_ref["w"].write(sm); await _writer_ref["w"].drain()
-                except Exception: pass
-                try: await asyncio.wait_for(asyncio.sleep(5.0), timeout=5.5)
-                except asyncio.TimeoutError: pass
-        except asyncio.CancelledError: raise
-        except Exception: pass
+            await asyncio.wait_for(holder["team_code_ready"].wait(), 25)
+        except asyncio.TimeoutError:
+            return
+        t0 = time.time()
+        while time.time() - t0 < 25:
+            if holder["slave_joined"] >= slave_set:
+                break
+            await asyncio.sleep(0.4)
+        await asyncio.sleep(SETTLE_AFTER_ALL_JOIN)
+        print(f"  Starting Match...")
+        s = br_start_squad_pkt(ingame_id, region, key, iv)
+        try:
+            writer.write(s)
+            await writer.drain()
+        except Exception:
+            return
+
+    start_task = asyncio.create_task(start_watcher())
 
     try:
         while True:
-            writer = None; gateway_ping_task = None
-            team_coord_task = None; member_trigger_task = None
             try:
-                rip = await resolve_host_cloudflare(ip)
-                reader, writer = await asyncio.open_connection(rip, int(port))
-                _writer_ref["w"] = writer
-                raw_sock = writer.get_extra_info('socket')
-                if raw_sock: optimize_tcp_socket(raw_sock)
-                await asyncio.sleep(bypass_hello_delay())
-                writer.write(bytes.fromhex(current_token)); await writer.drain()
-                try:
-                    ka = await send_keep_alive(account_region)
-                    if ka and not writer.is_closing():
-                        writer.write(ka); await asyncio.wait_for(writer.drain(), timeout=3)
-                except Exception: pass
-
-                async def func_gateway_keepalive():
-                    ka_bytes = await send_keep_alive(account_region)
-                    while True:
-                        await asyncio.sleep(bypass_ka_jitter(5.0))
-                        try:
-                            if writer and not writer.is_closing():
-                                writer.write(ka_bytes); await writer.drain()
-                        except Exception: break
-                gateway_ping_task = asyncio.create_task(func_gateway_keepalive())
-
-                connection_start_time = asyncio.get_running_loop().time()
-                last_watchdog_check = connection_start_time
-                search_attempts = 0
-                if reconnect_count_total > 0 and (reconnect_count_total % REGION_ROTATE_EVERY_N == 0):
-                    region_index = (region_index + 1) % len(REGION_ROTATION_LIST)
-                    current_search_region = REGION_ROTATION_LIST[region_index]
-                else:
-                    current_search_region = account_region or REGION_ROTATION_LIST[region_index]
-
-                print_success(f"[FUNC-{grp.tag()}] TCP connected {uid_str} (DNS:{rip} Lvl:{current_level})")
-                reconnects = 0; no_response_count = 0
-
-                async with grp.lock:
-                    grp.peers[uid_str] = {
-                        "writer": writer, "data": current_account_data,
-                        "key": current_key, "iv": current_iv}
-                    if grp.leader_uid is None:
-                        grp.leader_uid = uid_str
-                        print_success(f"[TEAM-{grp.tag()}] 👑 {uid_str} is leader")
-
-                if TEAM_MODE:
-                    team_coord_task = asyncio.create_task(_team_coordinator())
-                    member_trigger_task = asyncio.create_task(_member_match_trigger())
-                else:
-                    await start_game_battle_royale(current_search_region, client_version,
-                                                   writer, current_key, current_iv)
-
-                while True:
-                    active = 1 if (current_match_task and not current_match_task.done()) else 0
-
-                    now = asyncio.get_running_loop().time()
-                    if now - last_watchdog_check >= MATCH_WATCHDOG_CHECK:
-                        last_watchdog_check = now
-                        sd = now - connection_start_time
-                        if sd > MATCH_SEARCH_TIMEOUT:
-                            if active > 0:
-                                connection_start_time = now
-                            else:
-                                raise ConnectionError("Search watchdog")
-                    if search_attempts >= MAX_SEARCH_ATTEMPTS:
-                        raise ConnectionError("Max attempts")
-
-                    try:
-                        data = await asyncio.wait_for(reader.read(8192), timeout=0.5)
-                    except asyncio.TimeoutError:
-                        no_response_count += 1
-                        if TEAM_MODE:
-                            if no_response_count > TEAM_IDLE_ITERS_TEAM:
-                                raise ConnectionError("Team idle timeout")
-                        else:
-                            if no_response_count > 80: raise ConnectionError("idle")
-                        continue
-
-                    if not data: raise ConnectionError("closed")
-                    hex_data = data.hex()
-                    pl = len(data)
-                    no_response_count = 0
-
-                    try:
-                        tc = extract_team_code_from_bytes(data)
-                        if tc:
-                            async with grp.lock:
-                                if grp.team_code != tc:
-                                    grp.team_code = tc
-                                    should_banner = True
-                                else:
-                                    should_banner = False
-                            if should_banner:
-                                banner_team_code(tc, uid_str)
-                    except Exception: pass
-
-                    if hex_data.startswith("05") and pl > 10:
-                        await _handle_team_invite(hex_data, pl, uid_str, current_account_data,
-                                                  current_key, current_iv, writer, grp)
-                        continue
-
-                    if hex_data.startswith("0300") and 10 < pl < 30:
-                        continue
-
-                    if hex_data.startswith("0300") and pl >= 300:
-                        print_colored("=" * 60, Colors.GREEN)
-                        print_colored("MATCH FOUND! Loading...", Colors.GREEN)
-                        print_colored("=" * 60, Colors.GREEN)
-
-                        for tk in (team_coord_task, member_trigger_task):
-                            if tk and not tk.done():
-                                tk.cancel()
-                                try: await tk
-                                except asyncio.CancelledError: pass
-                        team_coord_task = None; member_trigger_task = None
-                        grp.active["flag"] = False
-
-                        try:
-                            res = json.loads(await decode_protobuf(hex_data[10:]))
-                            token = udp_key = match_code = server_ip_port = None
-                            match_account_id = block_val = None
-
-                            if '42' in res and 'data' in res['42']:
-                                match_code = res['42']['data']
-                            if '2' in res and 'data' in res['2'] and isinstance(res['2']['data'], str):
-                                server_ip_port = res['2']['data']
-                            if '3' in res and 'data' in res['3']:
-                                udp_key = res['3']['data']
-                            if '4' in res and 'data' in res['4']:
-                                token = res['4']['data']
-                            if '1' in res and 'data' in res['1']:
-                                match_account_id = res['1']['data']
-
-                            if '5' in res and 'data' in res['5'] and isinstance(res['5']['data'], dict):
-                                r5 = res['5']['data']
-                                server_ip_port = r5.get('2', {}).get('data') or server_ip_port
-                                udp_key = r5.get('3', {}).get('data') or udp_key
-                                token = r5.get('4', {}).get('data') or token
-                                if '42' in r5: match_code = r5['42']['data']
-                                block_val = r5.get('1', {}).get('data') or block_val
-
-                            print_info(f"[MATCH-DATA] server={server_ip_port} udp_key={str(udp_key)[:16]}... mcode={match_code}")
-
-                            effective = match_account_id or account_id or "BD_BOT"
-                            if token and udp_key and match_code and server_ip_port:
-                                acc_tok = current_account_data.get('access_token', '') if current_account_data else ""
-                                thunder, sharma = await build_match_startup_packets(
-                                    token, udp_key, match_code, effective, block_val or 0,
-                                    server_ip=server_ip_port, region=account_region,
-                                    client_version=client_version, access_token=acc_tok,
-                                    mode_id=BR_MODE_ID, map_id=BR_MAP_ID)
-
-                                try:
-                                    _uid_num = None
-                                    if current_account_data:
-                                        _uid_num = current_account_data.get('uid') or \
-                                                   current_account_data.get('auth_uid') or \
-                                                   current_account_data.get('open_id')
-                                    _uid_num = int(_uid_num) if _uid_num else int(effective)
-                                    _name = (current_account_data or {}).get('nickname', f"Player_{_uid_num}")
-                                    _acc_id = int(effective)
-                                    sm_pkt = build_start_match_v2(
-                                        _acc_id, _uid_num, _name, server_ip_port, udp_key,
-                                        token, match_code=str(match_code), region=account_region,
-                                        key=current_key, iv=current_iv, framed=True)
-                                    if writer and not writer.is_closing():
-                                        writer.write(sm_pkt); await writer.drain()
-                                        print_success(f"[START-MATCH] sent {len(sm_pkt)}B uid={_uid_num}")
-                                except Exception as _e:
-                                    print_warning(f"[START-MATCH] {_e}")
-
-                                match_index = await _inc_match(uid_str)
-                                print_colored(f"[MATCH #{match_index}] UDP -> {server_ip_port} (sequential)", Colors.CYAN)
-
-                                current_match_task = asyncio.create_task(play_game(
-                                    server_ip_port, thunder, sharma, udp_key, match_code,
-                                    effective, current_search_region, client_version,
-                                    current_key, current_iv,
-                                    match_index=match_index,
-                                    on_match_complete=trigger_post_match_refresh))
-
-                                await team_member_leave(grp, uid_str)
-                                await team_member_reset(grp, keep_leader=False)
-                                async with grp.lock:
-                                    grp.pk_code = None
-                                    grp.team_code = None
-                                    grp.peers[uid_str] = {
-                                        "writer": writer,
-                                        "data": current_account_data,
-                                        "key": current_key, "iv": current_iv}
-                                    if not grp.leader_uid:
-                                        grp.leader_uid = uid_str
-
-                                print_info(f"[MATCH #{match_index}] waiting for match to end...")
-                                try:
-                                    await current_match_task
-                                except Exception as e:
-                                    print_error(f"[MATCH #{match_index}] crashed: {e}")
-                                current_match_task = None
-
-                                print_success(f"[MATCH #{match_index}] ended. Closing TCP → offline → next round re-login.")
-                                await asyncio.sleep(AFTER_MATCH_COOLDOWN)
-
-                                return
-                            else:
-                                print_warning(f"[FUNC-{grp.tag()}] missing fields")
-                                await safe_close_writer(writer)
-                                await asyncio.sleep(NON_MATCH_RECONNECT_DELAY)
-                                break
-                        except Exception as e:
-                            print_error(f"[FUNC-{grp.tag()}] Match parse: {e}")
-                            traceback.print_exc()
-                            await safe_close_writer(writer)
-                            await asyncio.sleep(NON_MATCH_RECONNECT_DELAY)
-                            break
-
-                    if 30 <= pl <= 40: continue
-
-            except asyncio.CancelledError:
-                if current_match_task and not current_match_task.done():
-                    current_match_task.cancel()
-                    try: await current_match_task
-                    except Exception: pass
-                current_match_task = None
-                if gateway_ping_task: gateway_ping_task.cancel()
-                async with grp.lock:
-                    grp.peers.pop(uid_str, None)
-                    if grp.leader_uid == uid_str:
-                        grp.leader_uid = None
-                await team_member_leave(grp, uid_str)
-                raise
-            except Exception as e:
-                if gateway_ping_task: gateway_ping_task.cancel()
-                print_error(f"[FUNC-{grp.tag()}] TCP state {uid_str}: {e}")
-                await safe_close_writer(writer)
-                reconnect_count_total += 1
-                reconnects += 1
-                if reconnects > max_reconnects:
-                    reconnects = 0
-                    await asyncio.sleep(3)
-                    continue
-                await asyncio.sleep(bypass_human_reconnect_delay(reconnects))
-            finally:
-                grp.active["flag"] = False
-                for tk in (team_coord_task, member_trigger_task):
-                    if tk and not tk.done():
-                        tk.cancel()
-                        try: await tk
-                        except (asyncio.CancelledError, Exception): pass
-                if gateway_ping_task: gateway_ping_task.cancel()
-                await safe_close_writer(writer)
-                async with grp.lock:
-                    grp.peers.pop(uid_str, None)
-                    if grp.leader_uid == uid_str:
-                        grp.leader_uid = None
-                await team_member_leave(grp, uid_str)
-                grp.active["flag"] = True
-    except asyncio.CancelledError:
-        if current_match_task and not current_match_task.done():
-            current_match_task.cancel()
-        raise
-
-# ═══════════════ ACCOUNT WORKER ═══════════════
-async def account_loop_guest(uid, password, grp: TeamGroup,
-                             region_override=None):
-    uid = str(uid)
-    while True:
-        try:
-            print_info(f"[LOGIN] {uid}...")
-            ad = await login_via_core(uid, password, region_override)
-            print_success(f"[OK] {ad['account_id']} | {ad['nickname']} | R={ad['region']}")
-
-            reg = ad['region']
-            tcp_online = await build_tcp_startup_packet(
-                ad['account_id'], ad['token'], ad['server_time'],
-                ad['aes_ak'], ad['iv_i'], region=reg, typ='OnLine')
-
-            ping_stop = asyncio.Event()
-            try:
-                _phost = str(ad.get("server_url") or PING_URL).rstrip("/")
-                _purl = _phost if _phost.endswith("/Ping") else (_phost + "/Ping")
-                ping_task = asyncio.create_task(ping_worker(
-                    ad['account_id'], ad['token'], ad.get('release_version') or "OB55",
-                    region=reg, ping_url=_purl, stop_event=ping_stop))
+                chunk = await asyncio.wait_for(reader.read(65536), timeout=30)
+            except asyncio.TimeoutError:
+                continue
             except Exception:
-                ping_task = None
+                break
+            if not chunk:
+                break
+            buf.extend(chunk)
+            while len(buf) >= 5:
+                ptype = buf[0]
+                plen = int.from_bytes(buf[1:5], "big")
+                if plen > 100_000 or len(buf) < 5 + plen:
+                    break
+                payload = bytes(buf[5:5 + plen])
+                del buf[:5 + plen]
+                decoded = _decode_frame_payload(payload)
+                cmd = None
+                if isinstance(decoded, dict):
+                    v = decoded.get("4")
+                    if isinstance(v, dict):
+                        v = v.get("data")
+                    if isinstance(v, int):
+                        cmd = v
 
-            try:
-                while True:
-                    try:
-                        await functional_battle_royale(
-                            ad['game_server'], tcp_online, reg,
-                            ad.get('client_version') or FORCED_CLIENT_VERSION,
-                            ad['aes_ak'], ad['iv_i'], account_id=ad['account_id'],
-                            account_data=ad, account_level=1, grp=grp)
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as e:
-                        print_error(f"[RETRY] {uid}: {e}")
-                        traceback.print_exc()
+                if ptype == 0x05 and isinstance(decoded, dict):
+                    data = decoded.get("5", {})
 
-                    print_warning(f"[RETRY] {uid} session ended, restart {SESSION_RETRY_DELAY}s")
-                    await asyncio.sleep(SESSION_RETRY_DELAY)
-                    try:
-                        ad = await login_via_core(uid, password, region_override)
-                        reg = ad['region']
-                        tcp_online = await build_tcp_startup_packet(
-                            ad['account_id'], ad['token'], ad['server_time'],
-                            ad['aes_ak'], ad['iv_i'], region=reg, typ='OnLine')
-                        print_success(f"[RE-LOGIN] {uid} → fresh TCP ready")
-                    except Exception as e:
-                        print_error(f"[RELOGIN] {uid}: {e}")
-                        break
-            finally:
-                ping_stop.set()
-                if ping_task:
-                    ping_task.cancel()
-                    try: await ping_task
-                    except asyncio.CancelledError: pass
+                    if cmd == 1 and not created and plen >= 100:
+                        gid = None
+                        if isinstance(data, dict):
+                            g = data.get("1")
+                            if isinstance(g, dict):
+                                g = g.get("data")
+                            if isinstance(g, int):
+                                gid = g
+                        if gid is None:
+                            gid = ingame_id
+                        created = True
+                        holder["group_id"] = gid
+
+                    elif cmd == 32 and not holder["team_code"]:
+                        tc_val = _extract_team_code(decoded, ingame_id)
+                        if tc_val:
+                            holder["team_code"] = tc_val
+                            holder["team_code_ready"].set()
+                            print(f"  Teamcode => {tc_val}")
+
+                    if created and not op31_sent and holder["group_id"]:
+                        op31_sent = True
+                        try:
+                            p31 = await send_op31(holder["group_id"], region, key, iv)
+                            writer.write(p31)
+                            await writer.drain()
+                        except Exception:
+                            pass
+
+                    if cmd == 6:
+                        found = set()
+                        _collect_all_ints(decoded, found)
+                        newj = found & slave_set
+                        if newj:
+                            holder["slave_joined"] |= newj
+
+                    if cmd == 10:
+                        print(f"  Match Started")
+
+                minfo = _match_info_from_frame(ptype, cmd, decoded, payload)
+                if minfo is not None and tag not in match_infos:
+                    match_infos[tag] = minfo
+
+    finally:
+        start_task.cancel()
+        try:
+            await start_task
         except asyncio.CancelledError:
+            pass
+        ka_stop.set()
+        ka_task.cancel()
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+
+
+# ═══════════════ GUEST TOKEN & LOGIN ═══════════════
+async def get_guest_token(uid, password, max_retries=6):
+    import aiohttp
+    url = "https://100067.connect.garena.com/oauth/guest/token/grant"
+    versions = ['4.0.18P6', '4.0.19P7', '4.0.20P1', '4.1.0P3', '4.1.5P2', '4.2.1P8',
+                '4.2.3P1', '5.0.1B2', '5.0.2P4', '5.1.0P1', '5.2.0B1', '5.2.5P3',
+                '5.3.0B1', '5.3.2P2', '5.4.0P1', '5.4.3B2', '5.5.0P1', '5.5.2P3']
+    models = ['SM-A125F', 'SM-A225F', 'SM-A325M', 'SM-A515F', 'SM-A725F',
+              'SM-M215F', 'SM-M325FV', 'Redmi 9A', 'Redmi 9C', 'POCO M3',
+              'POCO M4 Pro', 'RMX2185', 'RMX3085', 'moto g(9) play',
+              'CPH2239', 'V2027', 'OnePlus Nord', 'ASUS_Z01QD']
+    android_versions = ['9', '10', '11', '12', '13', '14']
+    languages = ['en-US', 'bn-BD', 'hi-IN', 'id-ID', 'th-TH', 'vi-VN',
+                 'ru-RU', 'es-MX', 'pt-BR']
+    countries = ['IND', 'BGD', 'IDN', 'THA', 'VNM', 'RUS', 'MEX', 'BRA', 'USA']
+    ua = (f"GarenaMSDK/{random.choice(versions)}({random.choice(models)};"
+          f"Android {random.choice(android_versions)};"
+          f"{random.choice(languages)};{random.choice(countries)};)")
+    headers = {
+        "Host": "100067.connect.garena.com",
+        "User-Agent": ua,
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "close",
+    }
+    from core import _normalize_uid, SECRET
+    data = {
+        "uid": _normalize_uid(uid), "password": password,
+        "response_type": "token", "client_type": "2",
+        "client_secret": SECRET, "client_id": "100067",
+    }
+    last_err = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, data=data) as r:
+                    if r.status != 200:
+                        last_err = f"HTTP {r.status}"
+                        await asyncio.sleep(min(2.0 * attempt, 10.0))
+                        continue
+                    j = await r.json()
+                    oid = j.get("open_id")
+                    tok = j.get("access_token")
+                    plat = j.get("platform", 4)
+                    if oid and tok:
+                        return oid, tok, int(plat or 4)
+                    last_err = f"missing fields: {j}"
+        except Exception as e:
+            last_err = str(e)
+        await asyncio.sleep(min(2.0 * attempt, 10.0))
+    raise RuntimeError(f"guest token grant failed: {last_err}")
+
+
+async def _try_login_with_region(rec, account_region, tag):
+    uid = rec.get("uid")
+    password = rec.get("pass") or rec.get("password")
+    open_id = rec.get("open_id")
+    access_token = rec.get("access_token")
+    platform = rec.get("platform")
+
+    # Pehli baar token check karo
+    if not open_id or not access_token:
+        open_id, access_token, platform = await get_guest_token(uid, password)
+        rec["open_id"] = open_id
+        rec["access_token"] = access_token
+        rec["platform"] = platform
+    platform = int(platform or 4)
+
+    cfg_local = build_region_cfg(account_region)
+
+    login = None
+    last_err = None
+    for attempt in range(1, 5):
+        try:
+            login = await asyncio.to_thread(
+                major_login, tag, open_id, access_token, cfg_local,
+                platform, account_region)
             break
         except Exception as e:
-            print_error(f"[LOGIN-ERR] {uid}: {e}, retry 15s")
-            traceback.print_exc()
-            await asyncio.sleep(15)
+            last_err = e
+            # Agar token expire ho gaya hai (parse failed / HTTP 400), toh naya token force lo
+            if "parse failed" in str(e) or "HTTP" in str(e):
+                print(f"  [!] Token expired for {tag}, refreshing...")
+                try:
+                    open_id, access_token, platform = await get_guest_token(uid, password)
+                    rec["open_id"] = open_id
+                    rec["access_token"] = access_token
+                    rec["platform"] = platform
+                    platform = int(platform or 4)
+                    # Naye token ke saath turant retry karo
+                    login = await asyncio.to_thread(
+                        major_login, tag, open_id, access_token, cfg_local,
+                        platform, account_region)
+                    break
+                except Exception as e2:
+                    last_err = e2
+            await asyncio.sleep(min(2.0 * attempt, 10.0))
+            
+    if login is None:
+        raise RuntimeError(f"{tag} major_login gave up: {last_err}")
 
-# ═══════════════ LOAD / GROUPS ═══════════════
-def make_squad_groups(accounts: List[dict]) -> List[Tuple[TeamGroup, List[dict]]]:
-    groups = []
-    for gi, i in enumerate(range(0, len(accounts), TEAM_SIZE)):
-        chunk = accounts[i:i + TEAM_SIZE]
-        grp = TeamGroup(gi, size=len(chunk))
-        groups.append((grp, chunk))
-    return groups
+    payload = decode_jwt_payload(login["jwt"]) if login.get("jwt") else {}
+    lock_reg = (payload.get("lock_region") or "").upper()
 
-# ═══════════════ INTERACTIVE ENTRY ═══════════════
-async def start_match_interactive():
-    _load_login_cache_file()
+    if lock_reg and lock_reg != account_region:
+        account_region = lock_reg
+        cfg_local = build_region_cfg(lock_reg)
+        login = await asyncio.to_thread(
+            major_login, tag, open_id, access_token, cfg_local,
+            platform, lock_reg)
 
-    accounts = load_squad_accounts()
+    ld = await asyncio.to_thread(
+        get_login_data, tag, open_id, access_token, cfg_local,
+        platform, login["jwt"])
+    
+    return {
+        "tag": tag, "uid": uid, "ingame_id": login["account_id"],
+        "open_id": open_id, "access_token": access_token, "jwt": login["jwt"],
+        "key": _to_bytes(login.get("aes_key") or b""),
+        "iv": _to_bytes(login.get("aes_iv") or b""),
+        "ts": login.get("server_time", 0),
+        "game_server": ld["game_server"], "chat_server": ld["chat_server"],
+        "server_url": login.get("game_url"), "name": rec.get("name", "?"),
+        "cfg": cfg_local,
+        "region": account_region,
+    }
+
+
+async def login_account(rec, cfg, tag):
+    account_region = (rec.get("region") or "IND").upper()
+    attempts = [account_region]
+    for fallback in ("IND", "BD", "ME", "SG", "ID", "TH", "VN", "PK", "US", "BR"):
+        if fallback not in attempts:
+            attempts.append(fallback)
+    last_err = None
+    for reg in attempts:
+        try:
+            acct = await _try_login_with_region(rec, reg, tag)
+            if reg != account_region:
+                rec["region"] = reg
+            return acct
+        except Exception as e:
+            last_err = e
+            if "implausible result" in str(e) or "HTTP" in str(e):
+                rec["open_id"] = None
+                rec["access_token"] = None
+                rec["platform"] = None
+                continue
+            raise
+    raise RuntimeError(f"{tag} login failed for all regions: {last_err}")
+
+# ═══════════════ SQUAD ORCHESTRATION ═══════════════
+async def run_one_squad(batch, region_hint=None):
+    if not batch:
+        return False
+    if region_hint:
+        cfg = build_region_cfg(region_hint)
+    else:
+        cfg = build_region_cfg(batch[0].get("region", "IND"))
+
+    logged_in = []
+    for i, rec in enumerate(batch):
+        tag = "[M]" if i == 0 else f"[S{i}]"
+        try:
+            acct = await login_account(rec, cfg, tag)
+            acct["tag"] = tag
+            logged_in.append(acct)
+        except Exception as e:
+            print(f"  X {tag} login failed: {e}")
+        await asyncio.sleep(1.5)
+
+    if len(logged_in) < 2:
+        return False
+
+    master = logged_in[0]
+    slaves = logged_in[1:]
+    slave_ids = [int(s["ingame_id"]) for s in slaves]
+    squad_ids = [int(a["ingame_id"]) for a in logged_in]
+    print(f"  Team Leader => {master.get('name', '?')}")
+
+    holder = {
+        "group_id": None,
+        "team_code": None,
+        "team_code_ready": asyncio.Event(),
+        "slave_joined": set(),
+        "master_id": None,
+    }
+    match_infos = {}
+    slave_stop = asyncio.Event()
+    slave_tasks = [asyncio.create_task(
+        slave_loop(s, holder, match_infos, slave_stop)) for s in slaves]
+    await asyncio.sleep(2.0)
+    master_task = asyncio.create_task(
+        master_loop(master, slave_ids, holder, match_infos))
+        
+    expected_tags = [a["tag"] for a in logged_in]
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        if all(t in match_infos for t in expected_tags):
+            break
+        await asyncio.sleep(0.5)
+        
+    missing = [t for t in expected_tags if t not in match_infos]
+    if missing:
+        slave_stop.set()
+        for t in slave_tasks + [master_task]:
+            t.cancel()
+        await asyncio.gather(*(slave_tasks + [master_task]), return_exceptions=True)
+        return False
+
+    squad_done = {
+        "event": asyncio.Event(),
+        "count": 0,
+        "total": len(logged_in),
+        "started_at": time.time(),
+    }
+    udp_tasks = []
+    for a in logged_in:
+        r5 = match_infos[a["tag"]]
+        server_ip_port = r5["2"]
+        udp_key = r5["3"]
+        join_token = r5["4"]
+        match_code = r5["42"]
+        real_match_id = r5.get("1") or 0
+        real_map_id = r5.get("6") or 1
+        real_game_mode = r5.get("7") or 15
+        real_match_mode = r5.get("8") or 1
+        real_sleep_ms = r5.get("5") or 0
+
+        def _u(v):
+            return v.get("data") if isinstance(v, dict) else v
+
+        real_match_id = _u(real_match_id) or 0
+        real_map_id = _u(real_map_id) or 1
+        real_game_mode = _u(real_game_mode) or 15
+        real_match_mode = _u(real_match_mode) or 1
+        real_sleep_ms = _u(real_sleep_ms) or 0
+
+        prepare_packets, post_packet = await build_join_match_startup(
+            join_token, udp_key, match_code,
+            int(a["ingame_id"]), real_match_id,
+            server_ip=server_ip_port, region=a["region"],
+            client_version=a["cfg"].get("remote_version", _PLAY_VERSION),
+            client_version_code="2019121229",
+            access_token=a["access_token"],
+            match_id=real_match_id,
+            country=a["region"],
+            map_id=real_map_id,
+            game_mode=real_game_mode,
+            match_mode=real_match_mode,
+        )
+        udp_tasks.append(asyncio.create_task(play_game(
+            server_ip_port, prepare_packets, post_packet, udp_key, match_code,
+            int(a["ingame_id"]), a["region"],
+            a["cfg"].get("remote_version", _PLAY_VERSION),
+            tag=a["tag"],
+            account_jwt=join_token,
+            sleep_ms=real_sleep_ms,
+            squad_done=squad_done,
+        )))
+
+    tcp_tasks = slave_tasks + [master_task]
+    print(f"  Match Post")
+    try:
+        wait_task = asyncio.create_task(squad_done["event"].wait())
+        all_udp = asyncio.gather(*udp_tasks, return_exceptions=True)
+        
+        done_set, pending = await asyncio.wait(
+            [wait_task, all_udp],
+            timeout=SQUAD_TIMEOUT,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not wait_task.done():
+            wait_task.cancel()
+            
+        for task in udp_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*udp_tasks, return_exceptions=True)
+    except Exception:
+        pass
+    finally:
+        slave_stop.set()
+        for t in tcp_tasks:
+            t.cancel()
+        await asyncio.gather(*tcp_tasks, return_exceptions=True)
+    
+    return True
+
+
+async def run_squad_game(accounts, region_hint=None):
+    try:
+        with open(UDP_LOG_FILE, "w", encoding="utf-8") as f:
+            f.write(f"# {datetime.now().isoformat()}\n")
+    except Exception:
+        pass
     if not accounts:
-        print_error("No accounts found in squad_accounts.json")
+        return False
+
+    total = len(accounts)
+    batch_size = SQUAD_PLAYERS
+    batches = [accounts[i:i + batch_size] for i in range(0, total, batch_size)]
+
+    results = []
+
+    async def run_batch(idx, batch):
+        try:
+            res = await run_one_squad(batch, region_hint=region_hint)
+            results.append(res)
+        except Exception:
+            results.append(False)
+
+    await asyncio.gather(*[run_batch(i, b) for i, b in enumerate(batches, 1)], return_exceptions=True)
+    
+    return True if any(results) else False
+
+# ═══════════════ INTERACTIVE ENTRY (AUTO-REPEAT) ═══════════════
+async def start_match_interactive():
+    accounts = load_squad_accounts()
+    print(f"  [DEBUG] squad_accounts: {len(accounts)}")
+    if len(accounts) < 2:
+        accounts = load_accounts()
+        print(f"  [DEBUG] accs.txt loaded: {len(accounts)}")
+    if len(accounts) < 2:
+        print(f"  X Need at least 2 accounts (found {len(accounts)})")
         return
 
-    print_success(f"[BOOT] {len(accounts)} account(s) loaded from squad_accounts.json")
-
+    # ── Region ek baar hi poochho ──
+    from core import REGION_LIST
     print(f"\n  Choose Match Region:")
     row = []
     for i, r in enumerate(REGION_LIST, 1):
@@ -2111,47 +2128,26 @@ async def start_match_interactive():
     else:
         region_hint = None
 
-    print(f"\n  Starting match in region: {region_hint or 'auto'}\n")
+    print(f"\n  Region locked: {region_hint or 'auto'}  (Ctrl+C to stop)\n")
 
-    squads = make_squad_groups(accounts)
-    print_success(f"[SQUAD] {len(accounts)} account(s) -> {len(squads)} squad(s)")
-
-    tasks = []
-    for grp, chunk in squads:
-        for acc in chunk:
-            uid = str(acc.get("uid") or "").strip()
-            password = acc.get("pass") or acc.get("password")
-            if not uid or not password:
-                continue
-            region_override = region_hint or acc.get("region")
-            task = asyncio.create_task(
-                account_loop_guest(uid, password, grp, region_override))
-            tasks.append(task)
-            await asyncio.sleep(0.4)
-
-    try:
-        await asyncio.gather(*tasks, return_exceptions=True)
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        for t in tasks:
-            t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-    finally:
-        for t in tasks:
-            if not t.done():
-                t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+    # ── AUTO-REPEAT LOOP ──
+    match_no = 1
+    while True:
+        print(f"\n  ══════════ MATCH #{match_no} STARTING ══════════\n")
         try:
-            global _aiohttp_session
-            if _aiohttp_session is not None and not _aiohttp_session.closed:
-                await _aiohttp_session.close()
-                _aiohttp_session = None
-        except Exception:
-            pass
-        print_info("[CLEANUP] All connections closed.")
+            ok = await run_squad_game(accounts, region_hint=region_hint)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"  X Match #{match_no} crashed: {e}")
+            ok = False
 
+        status = "OK" if ok else "FAILED"
+        print(f"\n  ────────── MATCH #{match_no} ENDED [{status}] ──────────")
+        match_no += 1
 
-if __name__ == "__main__":
-    try:
-        asyncio.run(start_match_interactive())
-    except KeyboardInterrupt:
-        print_warning("stopped")
+        # Chhota gap taaki server rate-limit na kare
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            raise

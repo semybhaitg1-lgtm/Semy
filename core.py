@@ -1,6 +1,6 @@
 # ═══════════════════════════════════════════════════════════════════════════
-#  core.py — Login core (squad match ke liye only)
-#  Owner: AVI CODEX | Telegram: @AVI_CODEXX
+#  core.py — Shared core (ALL REGIONS, gen.py proven method)
+#  Owner: AVI CODEX| Telegram: @AVI_CODEXX
 # ═══════════════════════════════════════════════════════════════════════════
 
 import os
@@ -68,9 +68,9 @@ REGION_GROUP = {
 REGION_URLS = {
     "IND": {"server": "https://loginbp.ppmainecoonghj.com/",
             "client": "https://client.ind.freefiremobile.com/"},
-    "AMERICA": {"server": "https://loginbp.ppmainecoonghj.com/",
+    "AMERICA": {"server": "https://loginbp.ggpolarbear.com/",
                 "client": "https://client.us.freefiremobile.com/"},
-    "OTHERS": {"server": "https://loginbp.ppmainecoonghj.com/",
+    "OTHERS": {"server": "https://loginbp.ggpolarbear.com/",
                "client": "https://clientbp.ggpolarbear.com/"},
 }
 
@@ -102,13 +102,16 @@ SOURCE = 2
 SECRET = "2ee44819e9b4598845141067b281621874d0d5d7af9d8f7e00c1e54715b7d1e3"
 
 GARENA_BASE = "https://100067.connect.garena.com/api/v2/oauth"
+REGISTER_URL = f"{GARENA_BASE}/guest:register"
 GRANT_URL = f"{GARENA_BASE}/guest/token:grant"
 DATADOME_URL = "https://datadome.garena.com/js/"
 VER_URL_BASE = "https://version.ggwhitehawk.com/live/ver.php"
 PLAYSTORE_URL = "https://play.google.com/store/apps/details?id=com.dts.freefireth&hl=en&gl=US"
 
+MIN_REGISTER_INTERVAL = 1.0
 REGISTER_BACKOFF_START = 10.0
 REGISTER_BACKOFF_MAX = 60.0
+REGISTER_MAX_RETRIES = 6
 DATADOME_MAX_RETRIES = 4
 VER_MAX_ATTEMPTS = 3
 
@@ -126,11 +129,17 @@ _KEYSTREAM = bytes([
 
 SESSION_HASH = "1ac4b80ecf0478a44203bf8fac6120f5"
 
-# Sirf squad accounts
+ACCOUNTS_FILE = "accs.txt"
+CLAN_TRACKER_FILE = "clan_tracker.json"
+UDP_LOG_FILE = "udp_logs.txt"
 SQUAD_ACCOUNTS_FILE = "squad_accounts.json"
 
 REGION = "IND"
 LANG_CODE = "hi"
+
+SETTLE_AFTER_ALL_JOIN = 1.5
+SQUAD_PLAYERS = 4
+SQUAD_TIMEOUT = 600
 
 _PLAY_VERSION = "1.132.13"
 _OB_VERSION = "OB55"
@@ -151,13 +160,18 @@ HARDCODED_CONFIG = {
 
 _print_lock = threading.Lock()
 _file_lock = threading.Lock()
+_gate_lock = threading.Lock()
 _dd_lock = threading.Lock()
+_count_lock = threading.Lock()
 _log_lock = threading.Lock()
 
+_last_register_time = 0.0
+_success_count = 0
+_failure_count = 0
 _dd_session_cookie = None
 _dd_expires_at = 0.0
 
-# Movement constants (match.py use karta hai)
+# Movement constants (used by match.py)
 MOVE_HZ = 15.0
 MOVE_INTERVAL = 1.0 / MOVE_HZ
 DASH_VEL = 501
@@ -203,6 +217,15 @@ def _log(line):
     ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
     with _log_lock:
         print(f"[{ts}] {line}", flush=True)
+        try:
+            with open(UDP_LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(f"[{ts}] {line}\n")
+        except Exception:
+            pass
+
+
+def _tag(i, n):
+    return f"{i:>2}/{n}"
 
 
 def gen_nickname(prefix="vai"):
@@ -349,8 +372,40 @@ def first_value(fields, field_num, want_kind=None):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  SQUAD ACCOUNT STORAGE (sirf squad_accounts.json)
+#  ACCOUNT STORAGE
 # ═══════════════════════════════════════════════════════════════════════════
+def load_accounts():
+    if not os.path.exists(ACCOUNTS_FILE):
+        return []
+    out = []
+    with open(ACCOUNTS_FILE, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            p = line.split("|")
+            if len(p) < 9:
+                continue
+            out.append({
+                "uid": p[0], "pass": p[1], "name": p[2], "region": p[3],
+                "open_id": p[4], "access_token": p[5], "jwt": p[6],
+                "ingame_id": int(p[7]) if p[7].isdigit() else 0,
+                "game_url": p[8],
+            })
+    return out
+
+
+def append_account(acc):
+    line = "|".join([
+        acc["uid"], acc["pass"], acc["name"], acc["region"],
+        acc["open_id"], acc["access_token"], acc["jwt"],
+        str(acc["ingame_id"]), acc["game_url"],
+    ])
+    with _file_lock:
+        with open(ACCOUNTS_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+
+
 def load_squad_accounts(path=SQUAD_ACCOUNTS_FILE):
     if not os.path.exists(path):
         return []
@@ -371,6 +426,46 @@ def load_squad_accounts(path=SQUAD_ACCOUNTS_FILE):
         return out
     except Exception:
         return []
+
+
+def _load_json_dict(path):
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def load_clan_tracker():
+    return _load_json_dict(CLAN_TRACKER_FILE)
+
+
+def save_clan_tracker(tracker):
+    with _file_lock:
+        with open(CLAN_TRACKER_FILE, "w", encoding="utf-8") as f:
+            json.dump(tracker, f, indent=2, ensure_ascii=False)
+
+
+def track_account_clan(uid, clan_id, account_name="", ingame_id=""):
+    tracker = load_clan_tracker()
+    tracker.setdefault("clans", {})
+    tracker.setdefault("accounts", {})
+    ck = str(clan_id)
+    tracker["clans"].setdefault(ck, {
+        "accounts": [],
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    })
+    if uid not in tracker["clans"][ck]["accounts"]:
+        tracker["clans"][ck]["accounts"].append(uid)
+    tracker["accounts"][uid] = {
+        "clan_id": ck, "name": account_name, "ingame_id": ingame_id,
+        "joined_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    save_clan_tracker(tracker)
+    return True
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -468,63 +563,193 @@ def get_datadome(tag, force=False):
         raise RuntimeError(f"DataDome failed: {last}")
 
 
+def _wait_register_slot(tag):
+    global _last_register_time
+    while True:
+        with _gate_lock:
+            now = time.time()
+            wait = MIN_REGISTER_INTERVAL - (now - _last_register_time)
+            if wait <= 0:
+                _last_register_time = now
+                return
+        time.sleep(min(wait, 0.5))
+
+
 # ═══════════════════════════════════════════════════════════════════════════
-#  MAJOR LOGIN + GET LOGIN DATA (pb2 method — proven)
+#  GUEST REGISTER / TOKEN  (gen.py exact)
+# ═══════════════════════════════════════════════════════════════════════════
+def guest_register(tag, device_id, max_retries=REGISTER_MAX_RETRIES):
+    pwd = ''.join(random.choices(string.ascii_uppercase + string.digits, k=64))
+    payload = {"app_id": APP_ID, "client_type": CLIENT_TYPE,
+               "password": pwd, "source": SOURCE}
+    body = json.dumps(payload, separators=(",", ":"))
+    last_err = None
+    for attempt in range(1, max_retries + 1):
+        _wait_register_slot(tag)
+        datadome = get_datadome(tag, force=(attempt > 1 and attempt % 3 == 0))
+        headers = {
+            "User-Agent": USER_AGENT_MSDK,
+            "Authorization": f"Signature {sign_body(body)}",
+            "Cookie": f"datadome={datadome}",
+            "Accept": "application/json",
+            "Content-Type": "application/json; charset=utf-8",
+        }
+        try:
+            r = requests.post(REGISTER_URL, data=body, headers=headers, timeout=25)
+            data = r.json()
+        except Exception as e:
+            last_err = e
+            time.sleep(2.0 * attempt)
+            continue
+        code = data.get("code")
+        if code == 0:
+            return str(data["data"]["uid"]), pwd
+        if code in (1006, 1005):
+            wait = min(REGISTER_BACKOFF_START * (2 ** (attempt - 1)), REGISTER_BACKOFF_MAX)
+            last_err = data
+            time.sleep(wait)
+            continue
+        raise RuntimeError(f"guest:register failed: {data}")
+    raise RuntimeError(f"guest:register gave up: {last_err}")
+
+
+def guest_token(tag, uid, device_id, password):
+    uid_val = _normalize_uid(uid)
+    payload = {
+        "client_id": APP_ID, "client_secret": SECRET, "client_type": CLIENT_TYPE,
+        "device_id": device_id, "password": password,
+        "response_type": "token", "uid": uid_val,
+    }
+    body = json.dumps(payload, separators=(",", ":"))
+    datadome = get_datadome(tag)
+    last_err = None
+    for attempt in range(1, 5):
+        headers = {
+            "User-Agent": USER_AGENT_MSDK,
+            "Authorization": f"Signature {sign_body(body)}",
+            "Cookie": f"datadome={datadome}",
+            "Accept": "application/json",
+            "Content-Type": "application/json; charset=utf-8",
+        }
+        try:
+            r = requests.post(GRANT_URL, data=body, headers=headers, timeout=20)
+            data = r.json()
+        except Exception as e:
+            last_err = e
+            time.sleep(2.0 * attempt)
+            continue
+        code = data.get("code")
+        if code == 0:
+            return data["data"]
+        if code in (1006, 1005):
+            wait = min(REGISTER_BACKOFF_START * (2 ** (attempt - 1)), REGISTER_BACKOFF_MAX)
+            last_err = data
+            time.sleep(wait)
+            continue
+        last_err = data
+        if attempt < 4:
+            datadome = get_datadome(tag, force=True)
+            time.sleep(1.5 * attempt)
+            continue
+    raise RuntimeError(f"guest/token:grant failed: {last_err}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  MAJOR REGISTER  (gen.py exact)
+# ═══════════════════════════════════════════════════════════════════════════
+def major_register(tag, open_id, access_token, name, password, cfg):
+    url = cfg["server_url"].rstrip("/") + "/MajorRegister"
+    lang = cfg.get("lang", "en")
+    body = f_str(1, name)
+    body += f_str(2, access_token)
+    body += f_str(3, open_id)
+    body += f_vint(5, 102000007)
+    body += f_vint(6, 4)
+    body += f_vint(7, 1)
+    body += f_vint(13, 1)
+    body += f_bytes(14, encode_open_id(open_id))
+    body += f_str(15, lang)
+    body += f_vint(16, 2)
+    body += f_str(22, password)
+    headers = {
+        "User-Agent": USER_AGENT_UNITY,
+        "Accept": "*/*",
+        "Accept-Encoding": "deflate, gzip",
+        "Authorization": "Bearer",
+        "X-GA": "v1 1",
+        "X-GA-SV": str(int(time.time())),
+        "ReleaseVersion": cfg["latest_release_version"],
+        "Content-Type": "application/x-www-form-urlencoded",
+        "X-Unity-Version": "2018.4.12f1",
+    }
+    r = requests.post(url, data=enc_aes(body), headers=headers, timeout=20)
+    try:
+        fields = parse_proto(dec_aes(r.content))
+    except Exception:
+        fields = parse_proto(r.content)
+    result = first_value(fields, 1, "varint")
+    return result == 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  MAJOR LOGIN + GET LOGIN DATA  (gen.py exact — pb2 method)
 # ═══════════════════════════════════════════════════════════════════════════
 def _build_major_login_pb2(open_id, access_token, platform, client_version,
-                           region="IND", country="IND", lang="en"):
+                           region="IND", country="IND", lang="hi"):
     p = MajorloginReqBuild_pb2.MajorLogin()
     p.open_id = open_id
     p.access_token = access_token
-    p.client_version = client_version
+    p.client_version = client_version              # '1.132.21'
     p.event_time = str(int(time.time()))
     p.game_name = "free fire"
-    p.platform_id = 1
-    p.system_software = "Android OS 16 / API-36 (BP4A.251205.006/M066BXXS8CZI1)"
+    p.platform_id = 4
+    p.system_software = "Android 14 / API-34 (UKQ1.240624.001)"
     p.system_hardware = "Handheld"
-    p.telecom_operator = "WIFI"
-    p.network_type = "WIFI"
-    p.screen_width = 1600
-    p.screen_height = 720
-    p.screen_dpi = "300"
-    p.processor_details = "ARM64 FP ASIMD AES | 2400 | 8"
-    p.memory = 3507
-    p.gpu_renderer = "Mali-G57 MC2"
-    p.gpu_version = "OpenGL ES 3.2 v1.r38p1"
-    p.unique_device_id = "Google|6acc6a56-b955-42d6-9920-7c3faa8992e3"
-    p.client_ip = "122.174.21.31"
+    p.telecom_operator = "Airtel"
+    p.network_type = "WiFi"
+    p.screen_width = 1080
+    p.screen_height = 2400
+    p.screen_dpi = "440"
+    p.processor_details = "ARM64 FP ASIMD AES | 1876 | 10"
+    p.memory = 6034
+    p.gpu_renderer = "Adreno (TM) 642L"
+    p.gpu_version = "OpenGL ES 3.2 v1.r49p1-03bet0.19498e0ae1d5dac223383c39a2e58f04"
+    p.unique_device_id = "Google|22b9e015-fe56-49f4-8d83-caa66d71ddfc"
+    p.client_ip = "103.25.209.4"
     p.language = lang
     p.open_id_type = "4"
     p.device_type = "Handheld"
-    p.device_model = "samsung SM-S928B"
+    p.device_model = "poco 22101320I"
     p.country_code = country
-    p.platform_sdk_id = 1
-    p.network_operator_a = "WIFI"
-    p.network_type_a = "WIFI"
-    p.client_using_version = SESSION_HASH
-    p.external_storage_total = 47195
-    p.external_storage_available = 19418
-    p.internal_storage_total = 5135
-    p.internal_storage_available = 5135
-    p.game_disk_storage_available = 19546
-    p.game_disk_storage_total = 47195
-    p.external_sdcard_avail_storage = 19546
-    p.external_sdcard_total_storage = 47195
-    p.field_70 = 4
+    p.platform_sdk_id = 4
+    p.network_operator_a = "Airtel"
+    p.network_type_a = "4G"
+    p.client_using_version = SESSION_HASH        # '1ac4b80ecf0478a44203bf8fac6120f5'
+    p.external_storage_total = 109278
+    p.external_storage_available = 55402
+    p.internal_storage_total = 868
+    p.internal_storage_available = 868
+    p.game_disk_storage_available = 55927
+    p.game_disk_storage_total = 109278
+    p.external_sdcard_avail_storage = 55927
+    p.external_sdcard_total_storage = 109278
+    p.field_70 = 4                                # platform_variant
     p.login_by = 3
-    p.library_path = "/data/app/~~bsxEK2UVui2u9YoL_QKi_w==/com.garena.game.ffi-p7Uh_JDc-8hCjRgLvsaRqg==/lib/arm64"
+    p.library_path = ("/data/app/~~6Cw028g_ld-8Z0z2qhrOLA==/"
+                      "com.garena.game.ffi-i3wiaEmpx8CbiRVhUMx_ag==/lib/arm64")
     p.reg_avatar = 3
-    p.library_token = ("dd9d4c174e0472d34b7fd34bd5924bc9|"
-                       "/data/app/~~bsxEK2UVui2u9YoL_QKi_w==/com.garena.game.ffi-p7Uh_JDc-8hCjRgLvsaRqg==/base.apk")
-    p.channel_type = 3
-    p.cpu_type = 2
+    p.library_token = ("b8e0cd5e295eee42f5860d3c86e483dd|"
+                       "/data/app/~~6Cw028g_ld-8Z0z2qhrOLA==/"
+                       "com.garena.game.ffi-i3wiaEmpx8CbiRVhUMx_ag==/base.apk")
+    p.channel_type = 6
+    p.cpu_type = 1
     p.cpu_architecture = "64"
     p.client_version_code = "2019121269"
     p.field_85 = 3
-    p.graphics_api = "OpenGLES2"
+    p.graphics_api = "Vulkan"
     p.supported_astc_bitset = 8191
     p.login_open_id_type = 4
-    p.loading_time = 13070
+    p.loading_time = 14466
     p.release_channel = "android"
     p.extra_info = ("KqsHT3kf8XDT3vqFEnlSSQFMl5SRiWL2SxIxcx47LozWRI7AqvwWJ9eJ/"
                     "fXX0amawG9xA6DLOyWSJCij9Fp7M5o3bzp7/MjO1jDqX8PwDD8qq5vO")
@@ -671,11 +896,166 @@ def build_region_cfg(region):
     return cfg
 
 
+def get_cfg_for_region(region):
+    """Build config for region and refresh from ver.php."""
+    cfg = build_region_cfg(region)
+    lang = REGION_LANG.get(region, "en")
+    try:
+        pv = get_play_store_version()
+        fresh = fetch_ver_config(pv, region=region, lang=lang)
+        for k, v in fresh.items():
+            if v:
+                cfg[k] = v
+    except Exception as e:
+        print(f"      {region}: config refresh skipped ({e})")
+    return cfg
+
+
 # ═══════════════════════════════════════════════════════════════════════════
-#  GUEST TOKEN (async — login ke liye)
+#  ACCOUNT CREATION
+# ═══════════════════════════════════════════════════════════════════════════
+def create_one_account(index, total, cfg, custom_name=None):
+    tag = _tag(index, total)
+    time.sleep(random.uniform(0.05, 0.5))
+    try:
+        print(f"  [{tag}] register...", end="", flush=True)
+        device_id = "02-" + str(uuid.uuid4())
+        uid, password = guest_register(tag, device_id)
+        print(f" uid={uid}", end="", flush=True)
+
+        print(f"  token...", end="", flush=True)
+        tokens = guest_token(tag, uid, device_id, password)
+        open_id = tokens["open_id"]
+        access_token = tokens["access_token"]
+        platform = int(tokens.get("platform",
+                                  tokens.get("main_active_platform", 4)) or 4)
+        print(f" ok", end="", flush=True)
+
+        print(f"  nick...", end="", flush=True)
+        nickname = gen_nickname(custom_name if custom_name else "vai")
+        print(f" {nickname}", end="", flush=True)
+
+        print(f"  majreg...", end="", flush=True)
+        ok = major_register(tag, open_id, access_token, nickname, password, cfg)
+        print(f" {'ok' if ok else 'skip'}", end="", flush=True)
+
+        print(f"  login...", end="", flush=True)
+        login = major_login(tag, open_id, access_token, cfg, platform,
+                            region=cfg["country_code"])
+        payload = decode_jwt_payload(login["jwt"]) if login.get("jwt") else {}
+        lock_reg = (payload.get("lock_region") or cfg["country_code"]).upper()
+
+        cfg_use = cfg
+        if lock_reg != cfg.get("country_code", cfg["region"]):
+            cfg_use = build_region_cfg(lock_reg)
+            login = major_login(tag, open_id, access_token, cfg_use,
+                                platform, region=lock_reg)
+
+        print(f"  data...", end="", flush=True)
+        ld = get_login_data(tag, open_id, access_token, cfg_use,
+                            platform, login["jwt"])
+        print(f" done", flush=True)
+
+        account = {
+            "uid": uid,
+            "pass": password,
+            "name": nickname,
+            "ingame_id": login.get("account_id"),
+            "region": lock_reg,
+            "open_id": open_id,
+            "access_token": access_token,
+            "refresh_token": tokens.get("refresh_token"),
+            "jwt": login.get("jwt"),
+            "game_server": ld.get("game_server"),
+            "chat_server": ld.get("chat_server"),
+            "game_url": login.get("game_url") or cfg_use["server_url"],
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        append_account(account)
+        global _success_count
+        with _count_lock:
+            _success_count += 1
+        return account
+    except Exception as e:
+        global _failure_count
+        with _count_lock:
+            _failure_count += 1
+        print(f"  X [{tag}] FAILED: {e}")
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  INTERACTIVE — GEN ACCOUNTS
+# ═══════════════════════════════════════════════════════════════════════════
+def ask_region_menu(default="IND"):
+    print(f"\n  Choose Region:")
+    row = []
+    for i, r in enumerate(REGION_LIST, 1):
+        row.append(f"{i:>2}. {r}")
+        if i % 3 == 0:
+            print(f"      " + "      ".join(row))
+            row = []
+    if row:
+        print(f"      " + "      ".join(row))
+    while True:
+        try:
+            raw = input("  > ").strip().upper()
+        except (EOFError, KeyboardInterrupt):
+            sys.exit(0)
+        if not raw:
+            return default
+        if raw in REGION_LIST:
+            return raw
+        if raw.isdigit() and 1 <= int(raw) <= len(REGION_LIST):
+            return REGION_LIST[int(raw) - 1]
+        print(f"  ! invalid, try again")
+
+
+def generate_accounts_interactive():
+    print(f"\n  Gen Count => ", end="")
+    try:
+        count = int(input().strip())
+    except (ValueError, EOFError, KeyboardInterrupt):
+        return []
+    if count <= 0:
+        return []
+
+    print(f"  Name => ", end="")
+    try:
+        name_prefix = input().strip()
+    except (EOFError, KeyboardInterrupt):
+        return []
+    if not name_prefix:
+        name_prefix = "vai"
+
+    global REGION, LANG_CODE
+    REGION = ask_region_menu(default=REGION)
+    LANG_CODE = REGION_LANG.get(REGION, "en")
+    print(f"\n  Region => {REGION}\n")
+
+    cfg = get_cfg_for_region(REGION)
+    print(f"  [*] version={cfg.get('remote_version', '?')} "
+          f"server={cfg.get('server_url', '?')}\n")
+
+    accounts = []
+    for i in range(1, count + 1):
+        try:
+            acc = create_one_account(i, count, cfg, name_prefix)
+            if acc:
+                accounts.append(acc)
+                print(f"  Gen => {acc['name']} (region={acc['region']})")
+        except Exception as e:
+            print(f"  X [{i}/{count}] failed: {e}")
+        time.sleep(0.5)
+
+    return accounts
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  GUEST TOKEN (async, used by clan + match)
 # ═══════════════════════════════════════════════════════════════════════════
 async def get_guest_token(uid, password, max_retries=6):
-    """Async guest token grant — match login ke liye."""
+    """Async version of guest_token — same logic, same URL, same headers."""
     uid_val = _normalize_uid(uid)
     payload = {
         "client_id": APP_ID, "client_secret": SECRET, "client_type": CLIENT_TYPE,
@@ -684,16 +1064,16 @@ async def get_guest_token(uid, password, max_retries=6):
         "response_type": "token", "uid": uid_val,
     }
     body = json.dumps(payload, separators=(",", ":"))
-
+    
     last_err = None
     for attempt in range(1, max_retries + 1):
         try:
-            datadome = await asyncio.to_thread(get_datadome, "[login]", (attempt > 1))
+            datadome = await asyncio.to_thread(get_datadome, "[clan]", (attempt > 1))
         except Exception as e:
             last_err = f"DataDome failed: {e}"
             await asyncio.sleep(min(2.0 * attempt, 10.0))
             continue
-
+        
         headers = {
             "User-Agent": USER_AGENT_MSDK,
             "Authorization": f"Signature {sign_body(body)}",
@@ -701,7 +1081,7 @@ async def get_guest_token(uid, password, max_retries=6):
             "Accept": "application/json",
             "Content-Type": "application/json; charset=utf-8",
         }
-
+        
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(GRANT_URL, data=body, headers=headers, timeout=20) as r:
@@ -724,3 +1104,117 @@ async def get_guest_token(uid, password, max_retries=6):
             last_err = str(e)
         await asyncio.sleep(min(2.0 * attempt, 10.0))
     raise RuntimeError(f"guest token grant failed: {last_err}")
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  CLAN JOIN
+# ═══════════════════════════════════════════════════════════════════════════
+async def join_clan_for_account(account, clan_id):
+    uid = str(account.get("uid") or "").strip()
+    password = account.get("pass") or account.get("password")
+    if not uid or not password:
+        return False, "Missing uid or password"
+
+    account_region = (account.get("region") or "IND").upper()
+
+    try:
+        open_id, access_token, platform = await get_guest_token(uid, password)
+    except Exception as e:
+        return False, f"Token grant failed: {e}"
+    if not open_id or not access_token:
+        return False, "Failed to get token"
+
+    platform = int(platform or 4)
+    cfg_local = build_region_cfg(account_region)
+
+    try:
+        login = await asyncio.to_thread(
+            major_login, "[clan]", open_id, access_token,
+            cfg_local, platform, account_region
+        )
+    except Exception as e:
+        return False, f"MajorLogin failed: {e}"
+
+    jwt = login.get("jwt")
+    base_url = login.get("game_url") or cfg_local["server_url"]
+    payload = decode_jwt_payload(jwt) if jwt else {}
+    region_from_jwt = (payload.get("lock_region") or account_region).upper()
+
+    # Build RequestJoinClan protobuf
+    body = bytearray()
+    body.extend(enc_varint((1 << 3) | 0))
+    body.extend(enc_varint(int(clan_id)))
+    payload_bytes = AES.new(KEY, AES.MODE_CBC, IV).encrypt(pad(bytes(body), 16))
+
+    headers = {
+        "User-Agent": USER_AGENT_UNITY,
+        "Accept": "*/*",
+        "Accept-Encoding": "deflate, gzip",
+        "X-Ga-Sv": str(int(time.time())),
+        "Authorization": f"Bearer {jwt}",
+        "X-Ga": "v1 1",
+        "ReleaseVersion": _OB_VERSION,
+        "Content-Type": "application/x-www-form-urlencoded",
+        "X-Unity-Version": "2018.4.12f1",
+        "Connection": "Keep-Alive",
+        "Expect": "100-continue",
+        "X-Region": region_from_jwt,
+    }
+
+    url = f"{base_url.rstrip('/')}/RequestJoinClan"
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=payload_bytes,
+                                    headers=headers, ssl=ssl_context) as r:
+                status = r.status
+                await r.read()
+    except Exception as e:
+        return False, f"JoinClan failed: {e}"
+
+    if status == 200:
+        track_account_clan(uid, clan_id, account.get("name", ""),
+                           account.get("ingame_id", ""))
+        return True, "Successfully sent join request"
+    return False, f"HTTP {status}"
+
+
+async def join_clan_interactive():
+    print(f"\n  Enter Guild Uid => ", end="")
+    try:
+        clan_id = input().strip()
+    except (EOFError, KeyboardInterrupt):
+        return
+    if not clan_id or not clan_id.isdigit():
+        print(f"  X Guild Uid must be numeric")
+        return
+
+    accounts = load_accounts()
+    if not accounts:
+        accounts = load_squad_accounts()
+    if not accounts:
+        print(f"  X No accounts found.")
+        return
+
+    tracker = load_clan_tracker()
+    accounts_in_clans = tracker.get("accounts", {})
+    available = [a for a in accounts if a.get("uid") not in accounts_in_clans]
+
+    if not available:
+        print(f"  ! All accounts already in clans.")
+        return
+
+    print(f"\n  Joining {len(available)} account(s) to clan {clan_id}...\n")
+    ok_count = 0
+    for acc in available:
+        ok_flag, msg = await join_clan_for_account(acc, clan_id)
+        if ok_flag:
+            print(f"  Joined => {acc.get('name', '?')}")
+            ok_count += 1
+        else:
+            print(f"  X {acc.get('name', '?')} => {msg}")
+        await asyncio.sleep(1.0)
+
+    print(f"\n  [+] done: {ok_count}/{len(available)} joined")

@@ -1,20 +1,18 @@
 # ═══════════════════════════════════════════════════════════════════════════
-#  main.py — SEMY EDITION (AUTO: IND + match start, no prompt)
-#  Owner: SEMY | Telegram: @SEMY
+#  main.py — Entry Point & Menu  (AUTO-REPEAT MATCH EDITION)
+#  Owner: AVI CODEX  | Telegram: @AVI_CODEXX
 # ═══════════════════════════════════════════════════════════════════════════
 import os
 os.environ['PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION'] = 'python'
 import sys
 import asyncio
-import time
+import traceback
 
+# ═══════════════ OWNER DETAILS ═══════════════
+_OWNER_NAME = "AVI CODEX"
+_TG_ID = "@AVI_CODEXX"
 
-_OWNER_NAME = "SEMY"
-_TG_ID = "@SEMY"
-DEFAULT_REGION = "IND"      # ← auto-selected region
-COOLDOWN_AFTER_MATCH = 3.0  # cleanup grace
-
-
+# ═══════════════ BANNER ═══════════════
 def _show_banner():
     print(f"""
 ╔══════════════════════════════════════════════════════════════╗
@@ -26,7 +24,7 @@ def _show_banner():
 ║  ██║  ██║██║ ╚████║╚██████╔╝██║  ██║██║  ██║╚██████╔╝        ║
 ║  ╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝         ║
 ║                                                              ║
-║  SINGH EDITION — AUTO MODE (IND + AUTO MATCH ∞)              ║
+║  SINGH EDITION — All Regions Support                         ║
 ║                                                              ║
 ║  Owner      : {_OWNER_NAME:<46}║
 ║  Telegram   : {_TG_ID:<46}║
@@ -34,138 +32,78 @@ def _show_banner():
 ╚══════════════════════════════════════════════════════════════╝
 """)
 
+# ═══════════════ MENU ═══════════════
+def main_menu():
+    _show_banner()
 
-def _close_leaked_aiohttp():
-    try:
-        from match import _aiohttp_session as _m_sess
-        if _m_sess is not None and not _m_sess.closed:
-            loop = asyncio.new_event_loop()
-            try:
-                loop.run_until_complete(_m_sess.close())
-            finally:
-                loop.close()
-    except Exception:
-        pass
-
-
-async def _run_match_with_region(region: str):
-    """Patch match.start_match_interactive to skip region prompt."""
-    import match
-
-    # Override input() inside start_match_interactive so it auto-picks region
-    original_input = None
-    try:
-        original_input = match.__dict__.get('_orig_builtin_input')
-    except Exception:
-        pass
-
-    # Simpler: monkeypatch builtins.input temporarily so region prompt
-    # returns the numeric index of DEFAULT_REGION, and no further prompts block.
-    import builtins
-    orig_input = builtins.input
-
-    region_idx = "1"
-    try:
-        from core import REGION_LIST as _REGIONS
-        if region in _REGIONS:
-            region_idx = str(_REGIONS.index(region) + 1)
-    except Exception:
-        pass
-
-    _prompt_count = {"n": 0}
-    def _auto_input(prompt=""):
-        _prompt_count["n"] += 1
-        # First call inside start_match_interactive = region choice
-        if _prompt_count["n"] == 1:
-            return region_idx
-        # Any further input() calls → return empty string (no blocking)
-        return ""
-
-    builtins.input = _auto_input
-    try:
-        await match.start_match_interactive()
-    finally:
-        builtins.input = orig_input
-
-
-def run_auto_loop():
-    """Auto: pick IND + start match ∞ — no prompts, no menu."""
-    from match import start_match_interactive
-
-    round_n = 0
     while True:
-        round_n += 1
         print()
         print("  ╔══════════════════════════════════════════╗")
-        print(f"  ║       AUTO MATCH ROUND #{round_n:<3}              ║")
-        print(f"  ║       Region: {DEFAULT_REGION:<27}║")
+        print("  ║         MAIN MENU  BY AVI CODEX          ║")
+        print("  ╠══════════════════════════════════════════╣")
+        print("  ║  1. Gen Accounts (all regions)           ║")
+        print("  ║  2. Join Guild                           ║")
+        print("  ║  3. Start Match (all regions)            ║")
+        print("  ║  4. Exit                                 ║")
         print("  ╚══════════════════════════════════════════╝")
         print()
-
         try:
-            # Patch input for region auto-select
-            import builtins
-            orig_input = builtins.input
-            try:
-                from core import REGION_LIST as _REGIONS
-                region_idx = str(_REGIONS.index(DEFAULT_REGION) + 1) \
-                    if DEFAULT_REGION in _REGIONS else "1"
-            except Exception:
-                region_idx = "1"
+            choice = input("  > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            break
 
-            _prompt_count = {"n": 0}
-            def _auto_input(prompt=""):
-                _prompt_count["n"] += 1
-                if _prompt_count["n"] == 1:
-                    return region_idx
-                return ""
-
-            builtins.input = _auto_input
+        if choice == "1":
             try:
+                from core import generate_accounts_interactive
+                generate_accounts_interactive()
+            except Exception as e:
+                print(f"\n  X ERROR in Gen Accounts: {e}")
+                print("  ─── FULL TRACEBACK ───")
+                traceback.print_exc()
+
+        elif choice == "2":
+            try:
+                from core import join_clan_interactive
+                asyncio.run(join_clan_interactive())
+            except KeyboardInterrupt:
+                print("\n  Join Guild stopped by user.")
+            except Exception as e:
+                print(f"\n  X ERROR in Join Guild: {e}")
+                print("  ─── FULL TRACEBACK ───")
+                traceback.print_exc()
+
+        elif choice == "3":
+            try:
+                from match import start_match_interactive
                 asyncio.run(start_match_interactive())
-            finally:
-                builtins.input = orig_input
+            except KeyboardInterrupt:
+                print("\n  Match loop stopped by user.")
+            except Exception as e:
+                print(f"\n  X ERROR in Start Match: {e}")
+                print("  ─── FULL TRACEBACK ───")
+                traceback.print_exc()
 
-            print()
-            print("  ✅ Round complete — all connections closed.")
-            print(f"  ⏳ Cooling down {COOLDOWN_AFTER_MATCH:.0f}s before next round...")
-            time.sleep(COOLDOWN_AFTER_MATCH)
+        elif choice == "4":
+            print("  Exiting...")
+            break
+        else:
+            print(f"  ! Invalid choice, try again.")
 
-        except KeyboardInterrupt:
-            print()
-            print("  🛑 Ctrl+C — stopping auto loop.")
-            raise
-        except Exception as e:
-            print()
-            print(f"  X Round #{round_n} error: {e}")
-            import traceback
-            traceback.print_exc()
-            print(f"  ⏳ Retrying in {COOLDOWN_AFTER_MATCH:.0f}s...")
-            time.sleep(COOLDOWN_AFTER_MATCH)
-        finally:
-            _close_leaked_aiohttp()
-
-
-def main():
-    _show_banner()
-    print()
-    print(f"  🚀 AUTO MODE: Region={DEFAULT_REGION}, auto match ∞")
-    print("  🛑 Press Ctrl+C anytime to stop")
-    print()
-    time.sleep(1.0)
-
-    try:
-        run_auto_loop()
-    except KeyboardInterrupt:
         print()
-        print("  👋 Stopped by user.")
-        sys.exit(0)
-    except Exception as e:
-        print(f"\n  Fatal error: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+        try:
+            input("  Press Enter to continue...")
+        except (EOFError, KeyboardInterrupt):
+            break
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main_menu()
+    except KeyboardInterrupt:
+        print("\n  interrupted by user")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\n  Fatal error in main.py: {e}")
+        print("  ─── FULL TRACEBACK ───")
+        traceback.print_exc()
+        sys.exit(1)
