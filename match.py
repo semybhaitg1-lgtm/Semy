@@ -1577,7 +1577,7 @@ async def slave_loop(acct, holder, match_infos, stop_evt):
                 try:
                     chunk = await asyncio.wait_for(reader.read(65536), timeout=1.0)
                 except asyncio.TimeoutError:
-                    if not joined and time.time() - join_sent_at > 3:
+                    if not joined and time.time() - join_sent_at > 10:
                         joined = True
                         holder["slave_joined"].add(ingame_id)
                         print(f"  Bot Joined The Team => {acct.get('name', tag)}")
@@ -1670,11 +1670,11 @@ async def master_loop(acct, slave_ids, holder, match_infos):
 
     async def start_watcher():
         try:
-            await asyncio.wait_for(holder["team_code_ready"].wait(), 25)
+            await asyncio.wait_for(holder["team_code_ready"].wait(), 30)
         except asyncio.TimeoutError:
             return
         t0 = time.time()
-        while time.time() - t0 < 25:
+        while time.time() - t0 < 40:
             if holder["slave_joined"] >= slave_set:
                 break
             await asyncio.sleep(0.4)
@@ -1966,67 +1966,26 @@ async def run_one_squad(batch, region_hint=None):
     }
     match_infos = {}
     slave_stop = asyncio.Event()
-
-    # ══════════════════════════════════════════════════════════════
-    # STEP 1: MASTER PEHLE START — team create kare
-    # ══════════════════════════════════════════════════════════════
-    print(f"  [1/3] Creating team with master {master.get('name', '?')}...")
-    master_task = asyncio.create_task(
-        master_loop(master, slave_ids, holder, match_infos))
-
-    # ══════════════════════════════════════════════════════════════
-    # STEP 2: TEAM_CODE READY HONE TAK WAIT
-    #   Hosting pe network slow ho sakta hai, isliye 45s timeout
-    # ══════════════════════════════════════════════════════════════
-    try:
-        await asyncio.wait_for(holder["team_code_ready"].wait(), 45)
-        print(f"  [2/3] ✅ Team created (code: {holder['team_code']})")
-    except asyncio.TimeoutError:
-        print(f"  [2/3] ❌ Master failed to create team in 45s — aborting")
-        master_task.cancel()
-        try:
-            await master_task
-        except asyncio.CancelledError:
-            pass
-        return False
-
-    # ══════════════════════════════════════════════════════════════
-    # STEP 3: AB SLAVES START — join karein
-    #   Team already created hai, isliye koi race nahi
-    # ══════════════════════════════════════════════════════════════
-    print(f"  [3/3] Starting {len(slaves)} slaves to join team...")
     slave_tasks = [asyncio.create_task(
         slave_loop(s, holder, match_infos, slave_stop)) for s in slaves]
-
-    # ── Match info ka wait (all accounts) ──
+    await asyncio.sleep(2.0)
+    master_task = asyncio.create_task(
+        master_loop(master, slave_ids, holder, match_infos))
+        
     expected_tags = [a["tag"] for a in logged_in]
-    deadline = time.time() + 240   # 180 → 240 (hosting safety)
+    deadline = time.time() + 180
     while time.time() < deadline:
         if all(t in match_infos for t in expected_tags):
             break
         await asyncio.sleep(0.5)
-
+        
     missing = [t for t in expected_tags if t not in match_infos]
     if missing:
-        print(f"  ⚠ Match info missing for: {missing} — aborting squad")
         slave_stop.set()
         for t in slave_tasks + [master_task]:
             t.cancel()
         await asyncio.gather(*(slave_tasks + [master_task]), return_exceptions=True)
         return False
-
-    # ── Extra check: saare slaves actually joined hain? ──
-    all_joined = holder["slave_joined"] >= {int(s["ingame_id"]) for s in slaves}
-    if not all_joined:
-        joined_count = len(holder["slave_joined"])
-        print(f"  ⚠ SQUAD INCOMPLETE — joined {joined_count}/{len(slaves)} slaves")
-        slave_stop.set()
-        for t in slave_tasks + [master_task]:
-            t.cancel()
-        await asyncio.gather(*(slave_tasks + [master_task]), return_exceptions=True)
-        return False
-
-    print(f"  ✅ All {len(logged_in)} players joined team — proceeding to match")
 
     squad_done = {
         "event": asyncio.Event(),
@@ -2084,7 +2043,7 @@ async def run_one_squad(batch, region_hint=None):
     try:
         wait_task = asyncio.create_task(squad_done["event"].wait())
         all_udp = asyncio.gather(*udp_tasks, return_exceptions=True)
-
+        
         done_set, pending = await asyncio.wait(
             [wait_task, all_udp],
             timeout=SQUAD_TIMEOUT,
@@ -2092,7 +2051,7 @@ async def run_one_squad(batch, region_hint=None):
         )
         if not wait_task.done():
             wait_task.cancel()
-
+            
         for task in udp_tasks:
             if not task.done():
                 task.cancel()
@@ -2104,7 +2063,7 @@ async def run_one_squad(batch, region_hint=None):
         for t in tcp_tasks:
             t.cancel()
         await asyncio.gather(*tcp_tasks, return_exceptions=True)
-
+    
     return True
 
 
